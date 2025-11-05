@@ -722,15 +722,15 @@ class Match:
             img=frame, cards=self.cards, current_frame=self.frame_number
         )
 
-        # Draw counter box in bottom right corner
+        # Draw counter box in bottom left corner
         frame_width = frame.size[0]
         frame_height = frame.size[1]
-        # Position at bottom right: counter background is ~260px tall, add margin
-        # Make sure it's clearly at the bottom, not overlapping with top-right possession counter
+        # Position at bottom left: counter background is ~260px tall, add margin
         counter_background_height = 260  # Approximate height of counter background
         margin_bottom = 40  # Margin from bottom edge
+        margin_left = 40  # Margin from left edge
         counter_origin_y = frame_height - counter_background_height - margin_bottom
-        counter_origin = (frame_width - 540, counter_origin_y)
+        counter_origin = (margin_left, counter_origin_y)
 
         frame = self.draw_counter_background(
             frame,
@@ -829,9 +829,14 @@ class Match:
             Frame with elements of the match
         """
 
-        # get width of PIL.Image
+        # get width and height of PIL.Image
         frame_width = frame.size[0]
-        counter_origin = (frame_width - 540, 40)
+        frame_height = frame.size[1]
+        # Position at bottom right: counter background is ~260px tall, add margin
+        counter_background_height = 260  # Approximate height of counter background
+        margin_bottom = 40  # Margin from bottom edge
+        counter_origin_y = frame_height - counter_background_height - margin_bottom
+        counter_origin = (frame_width - 540, counter_origin_y)
 
         frame = self.draw_counter_background(
             frame,

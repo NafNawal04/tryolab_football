@@ -174,6 +174,11 @@ for i, frame in enumerate(video):
             frame = ball.draw(frame)
 
     if args.passes:
+        # Draw player tracking bounding boxes
+        frame = Player.draw_players(
+            players=players, frame=frame, confidence=False, id=True
+        )
+
         pass_list = match.passes
 
         frame = Pass.draw_pass_list(
@@ -185,6 +190,27 @@ for i, frame in enumerate(video):
         )
 
     if args.fouls:
+        # Draw player tracking bounding boxes
+        frame = Player.draw_players(
+            players=players, frame=frame, confidence=False, id=True
+        )
+
+        # Draw ball trail path
+        frame = path.draw(
+            img=frame,
+            detection=ball.detection,
+            coord_transformations=coord_transformations,
+            color=match.team_possession.color if match.team_possession else (255, 255, 255),
+        )
+
+        # Draw player with ball (triangle/pointer)
+        if match.closest_player:
+            frame = match.closest_player.draw_pointer(frame)
+
+        # Draw ball
+        if ball:
+            frame = ball.draw(frame)
+
         # Draw fouls and cards
         frame = match.draw_fouls_counter(
             frame, counter_background=possession_background, debug=False
