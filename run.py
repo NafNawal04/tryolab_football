@@ -1,4 +1,6 @@
 import argparse
+import logging
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -20,6 +22,7 @@ from soccer.draw import AbsolutePath
 from soccer.pass_event import Pass
 from soccer.foul_event import Foul
 from soccer.card_event import Card
+from soccernet import SoccerNetEventsOverlay
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -58,10 +61,52 @@ parser.add_argument(
     default=None,
     help="Path to trained SSD/YOLOv5 model for card detection (optional)",
 )
+parser.add_argument(
+    "--soccernet-predictions",
+    type=str,
+    default=None,
+    help="Path to SoccerNet predictions JSON to overlay on the output video",
+)
+parser.add_argument(
+    "--soccernet",
+    action="store_true",
+    help="Run SoccerNet CALF inference automatically to generate predictions",
+)
+parser.add_argument(
+    "--soccernet-root",
+    type=str,
+    default="soccernet",
+    help="Base directory containing SoccerNet assets and the CALF repository",
+)
+parser.add_argument(
+    "--soccernet-output-dir",
+    type=str,
+    default="soccernet/generated",
+    help="Directory where auto-generated SoccerNet predictions will be stored",
+)
+parser.add_argument(
+    "--soccernet-model",
+    type=str,
+    default="CALF_benchmark",
+    help="Name of the SoccerNet CALF model to use when running inference",
+)
+parser.add_argument(
+    "--soccernet-display-seconds",
+    type=float,
+    default=3.0,
+    help="Seconds to keep SoccerNet event annotations visible",
+)
+parser.add_argument(
+    "--soccernet-preroll-seconds",
+    type=float,
+    default=0.5,
+    help="Seconds before the event time to show the SoccerNet annotation",
+)
 args = parser.parse_args()
 
 video = Video(input_path=args.video)
 fps = video.video_capture.get(cv2.CAP_PROP_FPS)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # Object Detectors
 player_detector = YoloV5()
@@ -116,6 +161,54 @@ path = AbsolutePath()
 possession_background = match.get_possession_background()
 passes_background = match.get_passes_background()
 
+soccernet_overlay = None
+if args.soccernet_predictions:
+    try:
+        soccernet_overlay = SoccerNetEventsOverlay.from_json(
+            json_path=args.soccernet_predictions,
+            fps=fps,
+            display_seconds=args.soccernet_display_seconds,
+            pre_event_seconds=args.soccernet_preroll_seconds,
+        )
+        logging.info(
+            "Loaded %d SoccerNet events from %s",
+            len(soccernet_overlay.events),
+            args.soccernet_predictions,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        logging.warning("Unable to load SoccerNet predictions: %s", exc)
+        soccernet_overlay = None
+elif args.soccernet:
+    try:
+        from soccernet.predictor import (
+            SoccerNetPredictor,
+            SoccerNetPredictorConfig,
+            SoccerNetPredictorError,
+        )
+
+        predictor = SoccerNetPredictor(
+            SoccerNetPredictorConfig(
+                root_dir=Path(args.soccernet_root),
+                output_dir=Path(args.soccernet_output_dir),
+                model_name=args.soccernet_model,
+            )
+        )
+        predictions_path = predictor.generate_predictions(Path(args.video))
+        soccernet_overlay = SoccerNetEventsOverlay.from_json(
+            json_path=str(predictions_path),
+            fps=fps,
+            display_seconds=args.soccernet_display_seconds,
+            pre_event_seconds=args.soccernet_preroll_seconds,
+        )
+        logging.info(
+            "Loaded %d SoccerNet events from %s",
+            len(soccernet_overlay.events),
+            predictions_path,
+        )
+    except SoccerNetPredictorError as exc:
+        logging.error("Unable to auto-generate SoccerNet predictions: %s", exc)
+        soccernet_overlay = None
+
 for i, frame in enumerate(video):
 
     # Get Detections
@@ -153,6 +246,9 @@ for i, frame in enumerate(video):
 
     # Draw
     frame = PIL.Image.fromarray(frame)
+
+    if soccernet_overlay:
+        frame = soccernet_overlay.draw(frame, frame_index=i)
 
     if args.possession:
         frame = Player.draw_players(
