@@ -174,12 +174,15 @@ class SoccerNetPredictor:
         """
         Look for the predictions JSON emitted by CALF and return its path.
         """
-        output_root = self.repo_dir / "inference" / "output"
+        output_roots = [
+            self.repo_dir / "inference" / "output",
+            self.repo_dir / "inference" / "outputs",
+        ]
         candidates: list[Path] = []
 
-        if output_root.exists():
-            for path in output_root.rglob("*.json"):
-                candidates.append(path)
+        for root in output_roots:
+            if root.exists():
+                candidates.extend(path for path in root.rglob("*.json"))
 
         if not candidates:
             raise SoccerNetPredictorError(
@@ -187,16 +190,19 @@ class SoccerNetPredictor:
                 "Please verify the inference script output directory."
             )
 
-        # Prefer files inside the folder matching the video stem
         video_stem = video_path.stem
-        for path in candidates:
-            try:
-                path.relative_to(output_root / video_stem)
-            except ValueError:
-                continue
-            return path
 
-        # Fall back to the most recent JSON file
+        # Prefer JSON files located inside a directory named after the video stem
+        for root in output_roots:
+            stem_dir = root / video_stem
+            if stem_dir.exists():
+                stem_candidates = sorted(
+                    stem_dir.rglob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+                )
+                if stem_candidates:
+                    return stem_candidates[0]
+
+        # Fall back to the most recent JSON file across all outputs
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates[0]
 

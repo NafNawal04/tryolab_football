@@ -54,9 +54,17 @@ class SoccerNetEventsOverlay:
         with path.open("r", encoding="utf-8") as fp:
             raw_data = json.load(fp)
 
-        predictions = raw_data.get("predictions", [])
+        predictions = raw_data.get("predictions")
+        if predictions is None:
+            # Some CALF versions store results under different keys
+            for candidate_key in ("results", "events", "detections"):
+                if candidate_key in raw_data:
+                    predictions = raw_data[candidate_key]
+                    break
+        if predictions is None:
+            raise ValueError("Invalid SoccerNet predictions file: could not locate predictions list")
         if not isinstance(predictions, list):
-            raise ValueError("Invalid SoccerNet predictions file: expected 'predictions' list")
+            raise ValueError("Invalid SoccerNet predictions file: expected predictions to be a list")
 
         events: List[SoccerNetEvent] = []
         fps = float(fps) if fps else 25.0
@@ -98,9 +106,6 @@ class SoccerNetEventsOverlay:
                     half=half,
                 )
             )
-
-        if not events:
-            raise ValueError("No valid predictions found in SoccerNet predictions file")
 
         return cls(events=events, display_frames=max(1, display_frames))
 
