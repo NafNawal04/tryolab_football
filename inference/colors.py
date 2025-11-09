@@ -46,10 +46,27 @@ blue = {
     "upper_hsv": (126, 255, 255),
 }
 
+navy_blue = {
+    "name": "navy_blue",
+    "lower_hsv": (110, 90, 0),
+    "upper_hsv": (129, 255, 160),
+}
+
 black = {
     "name": "black",
     "lower_hsv": (0, 0, 0),
     "upper_hsv": (179, 255, 49),
 }
 
-all = [white, red, orange, yellow, green, sky_blue, blue, blueish_red, black]
+all = [
+    white,
+    red,
+    orange,
+    yellow,
+    green,
+    sky_blue,
+    blue,
+    navy_blue,
+    blueish_red,
+    black,
+]

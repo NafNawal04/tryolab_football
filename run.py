@@ -1,5 +1,6 @@
 import argparse
 import logging
+import re
 from pathlib import Path
 
 import cv2
@@ -10,7 +11,7 @@ from norfair.camera_motion import MotionEstimator
 from norfair.distances import mean_euclidean
 
 from inference import Converter, HSVClassifier, InertiaClassifier, YoloV5
-from inference.filters import filters
+from inference.filters import DEFAULT_MATCH_KEY, get_filters_for_match
 from run_utils import (
     get_ball_detections,
     get_main_ball,
@@ -24,6 +25,75 @@ from soccer.foul_event import Foul
 from soccer.card_event import Card
 from soccernet import SoccerNetEventsOverlay
 
+
+def build_match_setup(
+    match_key: str,
+    fps: float,
+    foul_cnn_model_path: str = None,
+    card_ssd_model_path: str = None,
+):
+    if match_key == "chelsea_man_city":
+        home = Team(
+            name="Chelsea",
+            abbreviation="CHE",
+            color=(255, 0, 0),
+            board_color=(244, 86, 64),
+            text_color=(255, 255, 255),
+        )
+        away = Team(
+            name="Man City",
+            abbreviation="MNC",
+            color=(240, 230, 188),
+            text_color=(0, 0, 0),
+        )
+        initial_possession = away
+    elif match_key == "real_madrid_barcelona":
+        home = Team(
+            name="Real Madrid",
+            abbreviation="RMA",
+            color=(255, 255, 255),
+            board_color=(235, 214, 120),
+            text_color=(0, 0, 0),
+        )
+        away = Team(
+            name="Barcelona",
+            abbreviation="BAR",
+            color=(128, 0, 128),
+            board_color=(28, 43, 92),
+            text_color=(255, 215, 0),
+        )
+        initial_possession = home
+    elif match_key == "france_croatia":
+        home = Team(
+            name="France",
+            abbreviation="FRA",
+            color=(0, 56, 168),
+            board_color=(16, 44, 87),
+            text_color=(255, 255, 255),
+        )
+        away = Team(
+            name="Croatia",
+            abbreviation="CRO",
+            color=(208, 16, 44),
+            board_color=(230, 230, 230),
+            text_color=(0, 0, 0),
+        )
+        initial_possession = home
+    else:
+        raise ValueError(f"Unsupported match key '{match_key}'")
+
+    match = Match(
+        home=home,
+        away=away,
+        fps=fps,
+        foul_cnn_model_path=foul_cnn_model_path,
+        card_ssd_model_path=card_ssd_model_path,
+    )
+    match.team_possession = initial_possession
+
+    return match, [home, away]
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--video",
@@ -33,6 +103,12 @@ parser.add_argument(
 )
 parser.add_argument(
     "--model", default="models/ball.pt", type=str, help="Path to the model"
+)
+parser.add_argument(
+    "--match",
+    type=str,
+    choices=["chelsea_man_city", "real_madrid_barcelona", "france_croatia"],
+    help="Preset match configuration to use (auto-detected from video if omitted)",
 )
 parser.add_argument(
     "--passes",
@@ -103,39 +179,88 @@ parser.add_argument(
     help="Seconds before the event time to show the SoccerNet annotation",
 )
 args = parser.parse_args()
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+
+MATCH_KEYWORDS = {
+    "chelsea_man_city": (
+        ("chelsea",),
+        ("man city", "manchester city", "man-city", "mancity", "mnc"),
+    ),
+    "real_madrid_barcelona": (
+        ("real madrid", "realmadrid", "real-madrid", "rma"),
+        ("barcelona", "barca", "fcb", "fcbarcelona", "bar"),
+    ),
+    "france_croatia": (
+        ("france", "fra", "les bleus", "bleus"),
+        ("croatia", "hrvatska", "cro", "hrv"),
+    ),
+}
+
+
+def infer_match_key_from_path(video_path: str) -> str:
+    """
+    Infer the configured match from the video path by looking for team keywords.
+    Falls back to DEFAULT_MATCH_KEY when nothing matches.
+    """
+
+    def _normalize(text: str) -> str:
+        text = text.lower()
+        text = re.sub(r"[^\w\s]", " ", text)
+        return text
+
+    path = Path(video_path)
+    candidates = [path.stem]
+    candidates.extend(part for part in path.parts if part)
+    text_blob = _normalize(" ".join(candidates))
+
+    for match_key, keyword_groups in MATCH_KEYWORDS.items():
+        found_all = True
+        for variants in keyword_groups:
+            if not any(_normalize(keyword) in text_blob for keyword in variants):
+                found_all = False
+                break
+        if found_all:
+            return match_key
+
+    return DEFAULT_MATCH_KEY
+
+
+match_key = args.match or infer_match_key_from_path(args.video)
+if args.match:
+    logging.info("Using match preset provided via CLI: %s", match_key)
+else:
+    if match_key == DEFAULT_MATCH_KEY:
+        logging.info(
+            "Unable to infer match from video path; using default preset '%s'",
+            DEFAULT_MATCH_KEY,
+        )
+    else:
+        logging.info(
+            "Auto-detected match preset '%s' based on video path '%s'",
+            match_key,
+            args.video,
+        )
 
 video = Video(input_path=args.video)
 fps = video.video_capture.get(cv2.CAP_PROP_FPS)
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # Object Detectors
 player_detector = YoloV5()
 ball_detector = YoloV5(model_path=args.model)
 
-# HSV Classifier
-hsv_classifier = HSVClassifier(filters=filters)
-
-# Add inertia to classifier
-classifier = InertiaClassifier(classifier=hsv_classifier, inertia=20)
-
-# Teams and Match
-chelsea = Team(
-    name="Chelsea",
-    abbreviation="CHE",
-    color=(255, 0, 0),
-    board_color=(244, 86, 64),
-    text_color=(255, 255, 255),
-)
-man_city = Team(name="Man City", abbreviation="MNC", color=(240, 230, 188))
-teams = [chelsea, man_city]
-match = Match(
-    home=chelsea,
-    away=man_city,
+match, teams = build_match_setup(
+    match_key=match_key,
     fps=fps,
     foul_cnn_model_path=args.foul_cnn_model,
     card_ssd_model_path=args.card_ssd_model,
 )
-match.team_possession = man_city
+
+filters_for_match = get_filters_for_match(match_key)
+hsv_classifier = HSVClassifier(filters=filters_for_match)
+
+# Add inertia to classifier
+classifier = InertiaClassifier(classifier=hsv_classifier, inertia=20)
 
 # Tracking
 player_tracker = Tracker(
