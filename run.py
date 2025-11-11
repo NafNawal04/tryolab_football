@@ -21,16 +21,11 @@ from run_utils import (
 from soccer import Match, Player, Team
 from soccer.draw import AbsolutePath
 from soccer.pass_event import Pass
-from soccer.foul_event import Foul
-from soccer.card_event import Card
-from soccernet import SoccerNetEventsOverlay
 
 
 def build_match_setup(
     match_key: str,
     fps: float,
-    foul_cnn_model_path: str = None,
-    card_ssd_model_path: str = None,
 ):
     if match_key == "chelsea_man_city":
         home = Team(
@@ -86,8 +81,6 @@ def build_match_setup(
         home=home,
         away=away,
         fps=fps,
-        foul_cnn_model_path=foul_cnn_model_path,
-        card_ssd_model_path=card_ssd_model_path,
     )
     match.team_possession = initial_possession
 
@@ -124,64 +117,6 @@ parser.add_argument(
     "--possession",
     action="store_true",
     help="Enable possession counter",
-)
-parser.add_argument(
-    "--fouls",
-    action="store_true",
-    help="Enable foul and card detection",
-)
-parser.add_argument(
-    "--foul-cnn-model",
-    type=str,
-    default=None,
-    help="Path to trained CNN model for foul classification (optional)",
-)
-parser.add_argument(
-    "--card-ssd-model",
-    type=str,
-    default=None,
-    help="Path to trained SSD/YOLOv5 model for card detection (optional)",
-)
-parser.add_argument(
-    "--soccernet-predictions",
-    type=str,
-    default=None,
-    help="Path to SoccerNet predictions JSON to overlay on the output video",
-)
-parser.add_argument(
-    "--soccernet",
-    action="store_true",
-    help="Run SoccerNet CALF inference automatically to generate predictions",
-)
-parser.add_argument(
-    "--soccernet-root",
-    type=str,
-    default="soccernet",
-    help="Base directory containing SoccerNet assets and the CALF repository",
-)
-parser.add_argument(
-    "--soccernet-output-dir",
-    type=str,
-    default="soccernet/generated",
-    help="Directory where auto-generated SoccerNet predictions will be stored",
-)
-parser.add_argument(
-    "--soccernet-model",
-    type=str,
-    default="CALF_benchmark",
-    help="Name of the SoccerNet CALF model to use when running inference",
-)
-parser.add_argument(
-    "--soccernet-display-seconds",
-    type=float,
-    default=3.0,
-    help="Seconds to keep SoccerNet event annotations visible",
-)
-parser.add_argument(
-    "--soccernet-preroll-seconds",
-    type=float,
-    default=0.5,
-    help="Seconds before the event time to show the SoccerNet annotation",
 )
 args = parser.parse_args()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -257,8 +192,6 @@ ball_detector = YoloV5(model_path=args.model)
 match, teams = build_match_setup(
     match_key=match_key,
     fps=fps,
-    foul_cnn_model_path=args.foul_cnn_model,
-    card_ssd_model_path=args.card_ssd_model,
 )
 
 filters_for_match = get_filters_for_match(match_key)
@@ -291,54 +224,6 @@ path = AbsolutePath()
 possession_background = match.get_possession_background()
 passes_background = match.get_passes_background()
 interceptions_background = match.get_interceptions_background() if args.interceptions else None
-
-soccernet_overlay = None
-if args.soccernet_predictions:
-    try:
-        soccernet_overlay = SoccerNetEventsOverlay.from_json(
-            json_path=args.soccernet_predictions,
-            fps=fps,
-            display_seconds=args.soccernet_display_seconds,
-            pre_event_seconds=args.soccernet_preroll_seconds,
-        )
-        logging.info(
-            "Loaded %d SoccerNet events from %s",
-            len(soccernet_overlay.events),
-            args.soccernet_predictions,
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        logging.warning("Unable to load SoccerNet predictions: %s", exc)
-        soccernet_overlay = None
-elif args.soccernet:
-    try:
-        from soccernet.predictor import (
-            SoccerNetPredictor,
-            SoccerNetPredictorConfig,
-            SoccerNetPredictorError,
-        )
-
-        predictor = SoccerNetPredictor(
-            SoccerNetPredictorConfig(
-                root_dir=Path(args.soccernet_root),
-                output_dir=Path(args.soccernet_output_dir),
-                model_name=args.soccernet_model,
-            )
-        )
-        predictions_path = predictor.generate_predictions(Path(args.video))
-        soccernet_overlay = SoccerNetEventsOverlay.from_json(
-            json_path=str(predictions_path),
-            fps=fps,
-            display_seconds=args.soccernet_display_seconds,
-            pre_event_seconds=args.soccernet_preroll_seconds,
-        )
-        logging.info(
-            "Loaded %d SoccerNet events from %s",
-            len(soccernet_overlay.events),
-            predictions_path,
-        )
-    except SoccerNetPredictorError as exc:
-        logging.error("Unable to auto-generate SoccerNet predictions: %s", exc)
-        soccernet_overlay = None
 
 for i, frame in enumerate(video):
 
@@ -377,9 +262,6 @@ for i, frame in enumerate(video):
 
     # Draw
     frame = PIL.Image.fromarray(frame)
-
-    if soccernet_overlay:
-        frame = soccernet_overlay.draw(frame, frame_index=i)
 
     if args.possession:
         frame = Player.draw_players(
@@ -428,33 +310,6 @@ for i, frame in enumerate(video):
             frame,
             counter_background=interceptions_background,
             debug=False,
-        )
-
-    if args.fouls:
-        # Draw player tracking bounding boxes
-        frame = Player.draw_players(
-            players=players, frame=frame, confidence=False, id=True
-        )
-
-        # Draw ball trail path
-        frame = path.draw(
-            img=frame,
-            detection=ball.detection,
-            coord_transformations=coord_transformations,
-            color=match.team_possession.color if match.team_possession else (255, 255, 255),
-        )
-
-        # Draw player with ball (triangle/pointer)
-        if match.closest_player:
-            frame = match.closest_player.draw_pointer(frame)
-
-        # Draw ball
-        if ball:
-            frame = ball.draw(frame)
-
-        # Draw fouls and cards
-        frame = match.draw_fouls_counter(
-            frame, counter_background=possession_background, debug=False
         )
 
     frame = np.array(frame)

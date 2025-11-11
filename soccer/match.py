@@ -9,8 +9,6 @@ from PIL import ImageDraw, ImageFont
 from soccer.ball import Ball
 from soccer.draw import Draw
 from soccer.pass_event import Pass, PassEvent
-from soccer.foul_event import Foul, FoulEvent
-from soccer.card_event import Card, CardEvent
 from soccer.player import Player
 from soccer.team import Team
 
@@ -21,8 +19,6 @@ class Match:
         home: Team,
         away: Team,
         fps: int = 30,
-        foul_cnn_model_path: Optional[str] = None,
-        card_ssd_model_path: Optional[str] = None,
     ):
         """
 
@@ -52,18 +48,6 @@ class Match:
         self.fps = fps
         # Pass detection
         self.pass_event = PassEvent()
-        # Foul detection (with CNN if available)
-        self.foul_event = FoulEvent(
-            cnn_model_path=foul_cnn_model_path,
-            use_cnn=True,
-            cnn_threshold=0.5,
-        )
-        # Card detection (with SSD if available)
-        self.card_event = CardEvent(
-            ssd_model_path=card_ssd_model_path,
-            use_ssd=True,
-            ssd_confidence=0.5,
-        )
         self.frame_number = 0
 
     def _load_font(self, size: int) -> ImageFont.ImageFont:
@@ -85,7 +69,7 @@ class Match:
         ball : Ball
             Ball
         frame : Optional[np.ndarray]
-            Current frame image (BGR format). Required for CNN/SSD-based foul/card detection.
+            Current frame image (BGR format).
         """
         self.update_possession()
 
@@ -120,18 +104,6 @@ class Match:
                 self.pass_event.update(closest_player=closest_player, ball=ball)
 
         self.pass_event.process_pass()
-
-        # Foul detection (with frame for CNN)
-        self.foul_event.update(players=players, frame_number=self.frame_number, frame=frame)
-
-        # Card detection (with frame for SSD)
-        recent_fouls = self.foul_event.recent_fouls(frames=30)
-        self.card_event.update(
-            fouls=recent_fouls,
-            players=players,
-            frame_number=self.frame_number,
-            frame=frame,
-        )
 
         self.frame_number += 1
 
@@ -178,16 +150,6 @@ class Match:
         away_passes = self.away.passes
 
         return home_passes + away_passes
-
-    @property
-    def fouls(self) -> List["Foul"]:
-        """Get all detected fouls"""
-        return self.foul_event.fouls
-
-    @property
-    def cards(self) -> List["Card"]:
-        """Get all detected cards"""
-        return self.card_event.cards
 
     def possession_bar(self, frame: PIL.Image.Image, origin: tuple) -> PIL.Image.Image:
         """
@@ -907,121 +869,6 @@ class Match:
 
         if self.closest_player:
             frame = self.closest_player.draw_pointer(frame)
-
-        if debug:
-            frame = self.draw_debug(frame=frame)
-
-        return frame
-
-    def draw_fouls_counter(
-        self,
-        frame: PIL.Image.Image,
-        counter_background: PIL.Image.Image,
-        debug: bool = False,
-    ) -> PIL.Image.Image:
-        """
-        Draw elements of the fouls in frame
-
-        Parameters
-        ----------
-        frame : PIL.Image.Image
-            Frame
-        counter_background : PIL.Image.Image
-            Counter background
-        debug : bool, optional
-            Whether to draw extra debug information, by default False
-
-        Returns
-        -------
-        PIL.Image.Image
-            Frame with foul elements drawn
-        """
-        # Draw fouls on frame
-        frame = Foul.draw_foul_list(
-            img=frame, fouls=self.fouls, current_frame=self.frame_number
-        )
-
-        # Draw cards on frame
-        frame = Card.draw_card_list(
-            img=frame, cards=self.cards, current_frame=self.frame_number
-        )
-
-        # Draw counter box in bottom left corner
-        frame_width = frame.size[0]
-        frame_height = frame.size[1]
-        # Position at bottom left: counter background is ~260px tall, add margin
-        counter_background_height = 260  # Approximate height of counter background
-        margin_bottom = 40  # Margin from bottom edge
-        margin_left = 40  # Margin from left edge
-        counter_origin_y = frame_height - counter_background_height - margin_bottom
-        counter_origin = (margin_left, counter_origin_y)
-
-        frame = self.draw_counter_background(
-            frame,
-            origin=counter_origin,
-            counter_background=counter_background,
-        )
-
-        # Get fouls by team
-        home_fouls = self.foul_event.get_fouls_by_team(self.home)
-        away_fouls = self.foul_event.get_fouls_by_team(self.away)
-
-        # Get cards by team
-        home_cards = self.card_event.get_cards_by_team(self.home)
-        away_cards = self.card_event.get_cards_by_team(self.away)
-
-        # Count cards by type
-        home_yellow = len([c for c in home_cards if c.card_type == "yellow"])
-        home_red = len([c for c in home_cards if c.card_type == "red"])
-        away_yellow = len([c for c in away_cards if c.card_type == "yellow"])
-        away_red = len([c for c in away_cards if c.card_type == "red"])
-
-        # Draw fouls counter
-        frame = self.draw_counter(
-            frame,
-            origin=(counter_origin[0] + 35, counter_origin[1] + 130),
-            text=self.home.abbreviation,
-            counter_text=f"Fouls: {len(home_fouls)}",
-            color=self.home.board_color,
-            text_color=self.home.text_color,
-            height=31,
-            width=150,
-        )
-        frame = self.draw_counter(
-            frame,
-            origin=(counter_origin[0] + 35 + 150 + 10, counter_origin[1] + 130),
-            text=self.away.abbreviation,
-            counter_text=f"Fouls: {len(away_fouls)}",
-            color=self.away.board_color,
-            text_color=self.away.text_color,
-            height=31,
-            width=150,
-        )
-
-        # Draw cards counter (yellow and red)
-        cards_text_home = f"Cards: {home_yellow}Y {home_red}R"
-        cards_text_away = f"Cards: {away_yellow}Y {away_red}R"
-        
-        frame = self.draw_counter(
-            frame,
-            origin=(counter_origin[0] + 35, counter_origin[1] + 195),
-            text=self.home.abbreviation,
-            counter_text=cards_text_home,
-            color=self.home.board_color,
-            text_color=self.home.text_color,
-            height=31,
-            width=150,
-        )
-        frame = self.draw_counter(
-            frame,
-            origin=(counter_origin[0] + 35 + 150 + 10, counter_origin[1] + 195),
-            text=self.away.abbreviation,
-            counter_text=cards_text_away,
-            color=self.away.board_color,
-            text_color=self.away.text_color,
-            height=31,
-            width=150,
-        )
 
         if debug:
             frame = self.draw_debug(frame=frame)
