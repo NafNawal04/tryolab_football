@@ -1,8 +1,10 @@
+from pathlib import Path
 from typing import List, Optional
 
 import cv2
 import numpy as np
 import PIL
+from PIL import ImageDraw, ImageFont
 
 from soccer.ball import Ball
 from soccer.draw import Draw
@@ -63,6 +65,13 @@ class Match:
             ssd_confidence=0.5,
         )
         self.frame_number = 0
+
+    def _load_font(self, size: int) -> ImageFont.ImageFont:
+        font_path = Path(__file__).resolve().parent.parent / "fonts" / "Gidole-Regular.ttf"
+        try:
+            return ImageFont.truetype(str(font_path), size=size)
+        except OSError:
+            return ImageFont.load_default()
 
     def update(self, players: List[Player], ball: Ball, frame: Optional[np.ndarray] = None):
         """
@@ -473,6 +482,35 @@ class Match:
         counter = counter.resize((int(315 * 1.2), int(210 * 1.2)))
         return counter
 
+    def get_interceptions_background(self) -> PIL.Image.Image:
+        """
+        Get interceptions counter background
+
+        Returns
+        -------
+        PIL.Image.Image
+            Counter background
+        """
+
+        width = int(315 * 1.2)
+        height = int(210 * 1.2)
+        background = PIL.Image.new("RGBA", (width, height), (10, 14, 28, 220))
+        draw = ImageDraw.Draw(background)
+
+        title_font = self._load_font(size=34)
+        subtitle_font = self._load_font(size=22)
+
+        def _draw_centered(text: str, y: int, font: ImageFont.ImageFont):
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            x = (width - text_width) // 2
+            draw.text((x, y), text, font=font, fill=(255, 255, 255, 235))
+
+        _draw_centered("INTERCEPTIONS", 24, title_font)
+        _draw_centered("BALL RECOVERIES", 74, subtitle_font)
+
+        return background
+
     def draw_counter_background(
         self,
         frame: PIL.Image.Image,
@@ -497,6 +535,95 @@ class Match:
             Frame with counter background
         """
         frame.paste(counter_background, origin, counter_background)
+        return frame
+
+    def interceptions_bar(self, frame: PIL.Image.Image, origin: tuple) -> PIL.Image.Image:
+        """
+        Draw interceptions bar
+
+        Parameters
+        ----------
+        frame : PIL.Image.Image
+            Frame
+        origin : tuple
+            Origin (x, y)
+
+        Returns
+        -------
+        PIL.Image.Image
+            Frame with interceptions bar
+        """
+
+        bar_x = origin[0]
+        bar_y = origin[1]
+        bar_height = 29
+        bar_width = 310
+
+        home_interceptions = self.home.interceptions
+        away_interceptions = self.away.interceptions
+        total_interceptions = home_interceptions + away_interceptions
+
+        if total_interceptions == 0:
+            home_ratio = 0
+            away_ratio = 0
+        else:
+            home_ratio = home_interceptions / total_interceptions
+            away_ratio = away_interceptions / total_interceptions
+
+        ratio = home_ratio
+
+        if ratio < 0.07:
+            ratio = 0.07
+
+        if ratio > 0.93:
+            ratio = 0.93
+
+        left_rectangle = (
+            origin,
+            [int(bar_x + ratio * bar_width), int(bar_y + bar_height)],
+        )
+
+        right_rectangle = (
+            [int(bar_x + ratio * bar_width), bar_y],
+            [int(bar_x + bar_width), int(bar_y + bar_height)],
+        )
+
+        left_color = self.home.board_color
+        right_color = self.away.board_color
+
+        frame = self.draw_counter_rectangle(
+            frame=frame,
+            ratio=ratio,
+            left_rectangle=left_rectangle,
+            left_color=left_color,
+            right_rectangle=right_rectangle,
+            right_color=right_color,
+        )
+
+        if ratio > 0.15:
+            home_text = f"{int(home_ratio * 100)}%"
+
+            frame = Draw.text_in_middle_rectangle(
+                img=frame,
+                origin=left_rectangle[0],
+                width=left_rectangle[1][0] - left_rectangle[0][0],
+                height=left_rectangle[1][1] - left_rectangle[0][1],
+                text=home_text,
+                color=self.home.text_color,
+            )
+
+        if ratio < 0.85:
+            away_text = f"{int(away_ratio * 100)}%"
+
+            frame = Draw.text_in_middle_rectangle(
+                img=frame,
+                origin=right_rectangle[0],
+                width=right_rectangle[1][0] - right_rectangle[0][0],
+                height=right_rectangle[1][1] - right_rectangle[0][1],
+                text=away_text,
+                color=self.away.text_color,
+            )
+
         return frame
 
     def draw_counter(
@@ -587,6 +714,103 @@ class Match:
             text=counter_text,
             color="black",
         )
+
+        return frame
+
+    def draw_interceptions_counter(
+        self,
+        frame: PIL.Image.Image,
+        counter_background: PIL.Image.Image,
+        debug: bool = False,
+    ) -> PIL.Image.Image:
+        """
+        Draw elements of the interceptions in frame
+
+        Parameters
+        ----------
+        frame : PIL.Image.Image
+            Frame
+        counter_background : PIL.Image.Image
+            Counter background
+        debug : bool, optional
+            Whether to draw extra debug information, by default False
+
+        Returns
+        -------
+        PIL.Image.Image
+            Frame with interceptions elements
+        """
+
+        frame_width = frame.size[0]
+        frame_height = frame.size[1]
+        margin_bottom = 40
+        margin_left = 40
+        background_height = counter_background.size[1]
+
+        counter_origin_y = frame_height - background_height - margin_bottom
+        counter_origin = (margin_left, counter_origin_y)
+
+        frame = self.draw_counter_background(
+            frame,
+            origin=counter_origin,
+            counter_background=counter_background,
+        )
+
+        interceptions_row_y = counter_origin[1] + 115
+        recoveries_row_y = counter_origin[1] + 170
+        bar_origin_y = counter_origin[1] + 210
+
+        frame = self.draw_counter(
+            frame,
+            origin=(counter_origin[0] + 35, interceptions_row_y),
+            text=self.home.abbreviation,
+            counter_text=f"Int: {self.home.interceptions}",
+            color=self.home.board_color,
+            text_color=self.home.text_color,
+            height=31,
+            width=150,
+        )
+
+        frame = self.draw_counter(
+            frame,
+            origin=(counter_origin[0] + 35 + 150 + 10, interceptions_row_y),
+            text=self.away.abbreviation,
+            counter_text=f"Int: {self.away.interceptions}",
+            color=self.away.board_color,
+            text_color=self.away.text_color,
+            height=31,
+            width=150,
+        )
+
+        frame = self.draw_counter(
+            frame,
+            origin=(counter_origin[0] + 35, recoveries_row_y),
+            text=self.home.abbreviation,
+            counter_text=f"Rec: {self.home.ball_recoveries}",
+            color=self.home.board_color,
+            text_color=self.home.text_color,
+            height=31,
+            width=150,
+        )
+
+        frame = self.draw_counter(
+            frame,
+            origin=(counter_origin[0] + 35 + 150 + 10, recoveries_row_y),
+            text=self.away.abbreviation,
+            counter_text=f"Rec: {self.away.ball_recoveries}",
+            color=self.away.board_color,
+            text_color=self.away.text_color,
+            height=31,
+            width=150,
+        )
+
+        frame = self.interceptions_bar(frame, origin=(counter_origin[0] + 35, bar_origin_y))
+
+        if self.closest_player:
+            frame = self.closest_player.draw_pointer(frame)
+
+        if debug:
+            frame = self.draw_debug(frame=frame)
 
         return frame
 

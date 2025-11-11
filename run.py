@@ -116,6 +116,11 @@ parser.add_argument(
     help="Enable pass detection",
 )
 parser.add_argument(
+    "--interceptions",
+    action="store_true",
+    help="Enable interception and ball recovery counter",
+)
+parser.add_argument(
     "--possession",
     action="store_true",
     help="Enable possession counter",
@@ -285,6 +290,7 @@ path = AbsolutePath()
 # Get Counter img
 possession_background = match.get_possession_background()
 passes_background = match.get_passes_background()
+interceptions_background = match.get_interceptions_background() if args.interceptions else None
 
 soccernet_overlay = None
 if args.soccernet_predictions:
@@ -408,6 +414,20 @@ for i, frame in enumerate(video):
 
         frame = match.draw_passes_counter(
             frame, counter_background=passes_background, debug=False
+        )
+
+    if args.interceptions:
+        frame = Player.draw_players(
+            players=players, frame=frame, confidence=False, id=True
+        )
+
+        if ball:
+            frame = ball.draw(frame)
+
+        frame = match.draw_interceptions_counter(
+            frame,
+            counter_background=interceptions_background,
+            debug=False,
         )
 
     if args.fouls:

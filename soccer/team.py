@@ -33,6 +33,8 @@ class Team:
         self.color = color
         self.abbreviation = abbreviation
         self.text_color = text_color
+        self.interceptions = 0
+        self.ball_recoveries = 0
 
         if board_color is None:
             self.board_color = color
