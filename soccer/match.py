@@ -117,6 +117,15 @@ class Match:
         team : Team, optional
             New team in possession
         """
+        previous_team = self.team_possession
+        if (
+            team is not None
+            and previous_team is not None
+            and previous_team != team
+        ):
+            previous_team.interceptions += 1
+            team.ball_recoveries += 1
+
         self.team_possession = team
 
     def update_possession(self):

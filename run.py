@@ -263,31 +263,26 @@ for i, frame in enumerate(video):
     # Draw
     frame = PIL.Image.fromarray(frame)
 
-    if args.possession:
-        frame = Player.draw_players(
-            players=players, frame=frame, confidence=False, id=True
-        )
+    # Always render player detections, ball trail, and ball overlay (baseline visualization)
+    frame = Player.draw_players(players=players, frame=frame, confidence=False, id=True)
 
+    if ball and ball.detection is not None:
         frame = path.draw(
             img=frame,
             detection=ball.detection,
             coord_transformations=coord_transformations,
-            color=match.team_possession.color,
+            color=match.team_possession.color if match.team_possession else (255, 255, 255),
         )
 
+    if ball:
+        frame = ball.draw(frame)
+
+    if args.possession:
         frame = match.draw_possession_counter(
             frame, counter_background=possession_background, debug=False
         )
 
-        if ball:
-            frame = ball.draw(frame)
-
     if args.passes:
-        # Draw player tracking bounding boxes
-        frame = Player.draw_players(
-            players=players, frame=frame, confidence=False, id=True
-        )
-
         pass_list = match.passes
 
         frame = Pass.draw_pass_list(
@@ -299,13 +294,6 @@ for i, frame in enumerate(video):
         )
 
     if args.interceptions:
-        frame = Player.draw_players(
-            players=players, frame=frame, confidence=False, id=True
-        )
-
-        if ball:
-            frame = ball.draw(frame)
-
         frame = match.draw_interceptions_counter(
             frame,
             counter_background=interceptions_background,

@@ -317,22 +317,4 @@ class PassEvent:
                     team=team, start_pass=start_pass, end_pass=end_pass
                 )
                 team.passes.append(new_pass)
-            else:
-                if (
-                    self.player_with_ball_counter
-                    < self.player_with_ball_threshold_dif_team
-                ):
-                    return
-
-                if (
-                    self.closest_player is not None
-                    and self.closest_player.team is not None
-                    and self.last_player_with_ball is not None
-                    and self.last_player_with_ball.team is not None
-                    and self.closest_player.team != self.last_player_with_ball.team
-                ):
-                    interception_team = self.closest_player.team
-                    interception_team.interceptions += 1
-                    interception_team.ball_recoveries += 1
-
             self.last_player_with_ball = self.closest_player
