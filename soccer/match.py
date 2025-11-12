@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -13,12 +13,131 @@ from soccer.player import Player
 from soccer.team import Team
 
 
+class PlayerDistanceTracker:
+    """
+    Tracks cumulative distance traveled by players across frames.
+    Uses stabilized coordinates (detection.points) for consistent distance calculations.
+    """
+    
+    def __init__(self, pixels_to_meters: Optional[float] = None):
+        """
+        Initialize the distance tracker.
+        
+        Parameters
+        ----------
+        pixels_to_meters : Optional[float], optional
+            Conversion factor from pixels to meters. If None, distances are in pixels.
+            For example, if 100 pixels = 1 meter, set to 0.01.
+            By default None (distances in pixels)
+        """
+        # Dictionary mapping player_id -> (last_position, cumulative_distance_pixels, cumulative_distance_meters)
+        self.player_positions: Dict[int, Tuple[Optional[np.ndarray], float, float]] = {}
+        self.pixels_to_meters = pixels_to_meters
+        
+    def update_player_distance(self, player: Player) -> Tuple[float, float]:
+        """
+        Update the cumulative distance for a player based on their current position.
+        
+        Parameters
+        ----------
+        player : Player
+            Player object with current detection
+            
+        Returns
+        -------
+        Tuple[float, float]
+            (distance_pixels, distance_meters) for this frame update.
+            If meters conversion is not set, distance_meters will be 0.0.
+        """
+        player_id = player.player_id
+        current_center = player.center
+        
+        if player_id is None or current_center is None:
+            return (0.0, 0.0)
+        
+        # Get last position and cumulative distance
+        last_pos, cumul_pixels, cumul_meters = self.player_positions.get(
+            player_id, (None, 0.0, 0.0)
+        )
+        
+        frame_distance_pixels = 0.0
+        frame_distance_meters = 0.0
+        
+        if last_pos is not None:
+            # Calculate Euclidean distance in pixel space
+            frame_distance_pixels = np.linalg.norm(current_center - last_pos)
+            cumul_pixels += frame_distance_pixels
+            
+            # Convert to meters if calibration is available
+            if self.pixels_to_meters is not None:
+                frame_distance_meters = frame_distance_pixels * self.pixels_to_meters
+                cumul_meters += frame_distance_meters
+        
+        # Update stored position and cumulative distances
+        self.player_positions[player_id] = (current_center.copy(), cumul_pixels, cumul_meters)
+        
+        return (frame_distance_pixels, frame_distance_meters)
+    
+    def get_player_distance(self, player_id: int, in_meters: bool = False) -> float:
+        """
+        Get the cumulative distance traveled by a player.
+        
+        Parameters
+        ----------
+        player_id : int
+            Player ID
+        in_meters : bool, optional
+            If True, return distance in meters (requires calibration).
+            If False, return distance in pixels. By default False
+            
+        Returns
+        -------
+        float
+            Cumulative distance. Returns 0.0 if player not found or conversion unavailable.
+        """
+        if player_id not in self.player_positions:
+            return 0.0
+        
+        _, cumul_pixels, cumul_meters = self.player_positions[player_id]
+        
+        if in_meters:
+            if self.pixels_to_meters is None:
+                return 0.0
+            return cumul_meters
+        else:
+            return cumul_pixels
+    
+    def get_all_distances(self, in_meters: bool = False) -> Dict[int, float]:
+        """
+        Get cumulative distances for all tracked players.
+        
+        Parameters
+        ----------
+        in_meters : bool, optional
+            If True, return distances in meters. By default False
+            
+        Returns
+        -------
+        Dict[int, float]
+            Dictionary mapping player_id -> cumulative_distance
+        """
+        result = {}
+        for player_id in self.player_positions:
+            result[player_id] = self.get_player_distance(player_id, in_meters=in_meters)
+        return result
+    
+    def reset(self):
+        """Reset all tracked distances."""
+        self.player_positions.clear()
+
+
 class Match:
     def __init__(
         self,
         home: Team,
         away: Team,
         fps: int = 30,
+        pixels_to_meters: Optional[float] = None,
     ):
         """
 
@@ -32,6 +151,11 @@ class Match:
             Away team
         fps : int, optional
             Fps, by default 30
+        pixels_to_meters : Optional[float], optional
+            Conversion factor from pixels to meters for distance tracking.
+            If None, distances are tracked in pixels only.
+            For example, if 100 pixels = 1 meter, set to 0.01.
+            By default None
         """
         self.duration = 0
         self.home = home
@@ -49,6 +173,9 @@ class Match:
         # Pass detection
         self.pass_event = PassEvent()
         self.frame_number = 0
+        # Distance tracking
+        self.pixels_to_meters = pixels_to_meters
+        self.distance_tracker = PlayerDistanceTracker(pixels_to_meters=pixels_to_meters)
 
     def _load_font(self, size: int) -> ImageFont.ImageFont:
         font_path = Path(__file__).resolve().parent.parent / "fonts" / "Gidole-Regular.ttf"
@@ -72,6 +199,11 @@ class Match:
             Current frame image (BGR format).
         """
         self.update_possession()
+        
+        # Update distance tracking for all players
+        for player in players:
+            if player.detection is not None and player.player_id is not None:
+                self.distance_tracker.update_player_distance(player)
 
         if ball is None or ball.detection is None:
             self.closest_player = None
@@ -955,3 +1087,118 @@ class Match:
             frame = self.draw_debug(frame=frame)
 
         return frame
+    
+    def get_player_distance(self, player: Player, in_meters: bool = False) -> float:
+        """
+        Get the cumulative distance traveled by a player.
+        
+        Parameters
+        ----------
+        player : Player
+            Player object
+        in_meters : bool, optional
+            If True, return distance in meters (requires calibration).
+            If False, return distance in pixels. By default False
+            
+        Returns
+        -------
+        float
+            Cumulative distance traveled by the player.
+            Returns 0.0 if player ID not found.
+        """
+        if player.player_id is None:
+            return 0.0
+        return self.distance_tracker.get_player_distance(player.player_id, in_meters=in_meters)
+    
+    def get_team_total_distance(self, players: List[Player], team: Team, in_meters: bool = False) -> float:
+        """
+        Get the total cumulative distance traveled by all players on a team.
+        
+        Parameters
+        ----------
+        players : List[Player]
+            Current list of players (to match IDs to teams)
+        team : Team
+            Team object
+        in_meters : bool, optional
+            If True, return distance in meters. By default False
+            
+        Returns
+        -------
+        float
+            Total cumulative distance for the team.
+        """
+        total = 0.0
+        all_distances = self.distance_tracker.get_all_distances(in_meters=in_meters)
+        
+        # Create a mapping of player_id -> team from current players
+        player_id_to_team = {}
+        for player in players:
+            if player.player_id is not None and player.team is not None:
+                player_id_to_team[player.player_id] = player.team
+        
+        # Sum distances for players on this team
+        for player_id, distance in all_distances.items():
+            if player_id in player_id_to_team and player_id_to_team[player_id] == team:
+                total += distance
+        
+        return total
+    
+    def get_all_distances(self, in_meters: bool = False) -> Dict[int, float]:
+        """
+        Get cumulative distances for all tracked players.
+        
+        Parameters
+        ----------
+        in_meters : bool, optional
+            If True, return distances in meters. By default False
+            
+        Returns
+        -------
+        Dict[int, float]
+            Dictionary mapping player_id -> cumulative_distance
+        """
+        return self.distance_tracker.get_all_distances(in_meters=in_meters)
+    
+    def get_distance_statistics(self, in_meters: bool = False) -> Dict[str, float]:
+        """
+        Get distance statistics across all tracked players.
+        
+        Parameters
+        ----------
+        in_meters : bool, optional
+            If True, return distances in meters. By default False
+            
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with keys: 'total', 'mean', 'min', 'max', 'median', 'count'
+        """
+        all_distances = self.distance_tracker.get_all_distances(in_meters=in_meters)
+        
+        if not all_distances:
+            return {
+                'total': 0.0,
+                'mean': 0.0,
+                'min': 0.0,
+                'max': 0.0,
+                'median': 0.0,
+                'count': 0
+            }
+        
+        distances_list = list(all_distances.values())
+        
+        return {
+            'total': sum(distances_list),
+            'mean': np.mean(distances_list),
+            'min': np.min(distances_list),
+            'max': np.max(distances_list),
+            'median': np.median(distances_list),
+            'count': len(distances_list)
+        }
+    
+    def reset_distance_tracking(self):
+        """
+        Reset all distance tracking data.
+        """
+        self.distance_tracker.reset()

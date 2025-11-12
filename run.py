@@ -21,11 +21,13 @@ from run_utils import (
 from soccer import Match, Player, Team
 from soccer.draw import AbsolutePath
 from soccer.pass_event import Pass
+from auto_calibrate import auto_calibrate
 
 
 def build_match_setup(
     match_key: str,
     fps: float,
+    pixels_to_meters: float = None,
 ):
     if match_key == "chelsea_man_city":
         home = Team(
@@ -81,6 +83,7 @@ def build_match_setup(
         home=home,
         away=away,
         fps=fps,
+        pixels_to_meters=pixels_to_meters,
     )
     match.team_possession = initial_possession
 
@@ -90,7 +93,7 @@ def build_match_setup(
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--video",
-    default="videos/soccer_possession.mp4",
+    default="videos/soccer_possession1.mp4",
     type=str,
     help="Path to the input video",
 )
@@ -117,6 +120,12 @@ parser.add_argument(
     "--possession",
     action="store_true",
     help="Enable possession counter",
+)
+parser.add_argument(
+    "--pixels-to-meters",
+    type=float,
+    default=None,
+    help="Conversion factor from pixels to meters (e.g., 0.01 for 100px=1m). If not provided, will be automatically calibrated.",
 )
 args = parser.parse_args()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -185,6 +194,16 @@ else:
 video = Video(input_path=args.video)
 fps = video.video_capture.get(cv2.CAP_PROP_FPS)
 
+# Auto-calibrate pixels_to_meters if not provided
+pixels_to_meters = args.pixels_to_meters
+if pixels_to_meters is None:
+    logging.info("No pixels-to-meters provided, auto-calibrating...")
+    pixels_to_meters = auto_calibrate(args.video)
+    if pixels_to_meters is None:
+        logging.warning("Auto-calibration failed. Distance tracking will use pixel units only.")
+    else:
+        logging.info(f"Auto-calibration successful: {pixels_to_meters:.6f} m/px")
+
 # Object Detectors
 player_detector = YoloV5()
 ball_detector = YoloV5(model_path=args.model)
@@ -192,6 +211,7 @@ ball_detector = YoloV5(model_path=args.model)
 match, teams = build_match_setup(
     match_key=match_key,
     fps=fps,
+    pixels_to_meters=pixels_to_meters,
 )
 
 filters_for_match = get_filters_for_match(match_key)
@@ -264,7 +284,7 @@ for i, frame in enumerate(video):
     frame = PIL.Image.fromarray(frame)
 
     # Always render player detections, ball trail, and ball overlay (baseline visualization)
-    frame = Player.draw_players(players=players, frame=frame, confidence=False, id=True)
+    frame = Player.draw_players(players=players, frame=frame, confidence=False, id=True, match=match)
 
     if ball and ball.detection is not None:
         frame = path.draw(

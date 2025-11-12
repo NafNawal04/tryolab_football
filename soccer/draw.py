@@ -130,6 +130,7 @@ class Draw:
         img: PIL.Image.Image,
         confidence: bool = False,
         id: bool = False,
+        distance: float = None,
     ) -> PIL.Image.Image:
         """
         Draw a bounding box on the image from a norfair.Detection
@@ -144,6 +145,8 @@ class Draw:
             Whether to draw confidence in the box, by default False
         id : bool, optional
             Whether to draw id in the box, by default False
+        distance : float, optional
+            Distance to display in meters, by default None
 
         Returns
         -------
@@ -181,10 +184,20 @@ class Draw:
                 color=color,
             )
 
+        if distance is not None:
+            # Display distance below the bounding box
+            distance_text = f"{distance:.1f}m"
+            img = Draw.draw_text(
+                img=img,
+                origin=(x1, y2 + 5),
+                text=distance_text,
+                color=color,
+            )
+
         if confidence:
             img = Draw.draw_text(
                 img=img,
-                origin=(x1, y2),
+                origin=(x1, y2 + 25 if distance is not None else y2),
                 text=str(round(detection.data["p"], 2)),
                 color=color,
             )

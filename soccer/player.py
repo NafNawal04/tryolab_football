@@ -70,6 +70,74 @@ class Player:
     def feet(self) -> np.ndarray:
         return np.array([self.left_foot, self.right_foot])
 
+    @property
+    def center(self) -> np.ndarray:
+        """
+        Returns the center position of the player in stabilized coordinates (pixels)
+        Uses the midpoint between the two feet for consistency
+        
+        Returns
+        -------
+        np.ndarray
+            Center position (x, y) in stabilized pixel coordinates
+        """
+        if self.detection is None:
+            return None
+        
+        # Use the center of the bounding box from stabilized coordinates
+        points = self.detection.points
+        if points is None or len(points) < 2:
+            return None
+        
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+        
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+        
+        return np.array([center_x, center_y])
+    
+    @property
+    def center_abs(self) -> np.ndarray:
+        """
+        Returns the center position of the player in absolute coordinates (pixels)
+        Uses the midpoint between the two feet for consistency
+        
+        Returns
+        -------
+        np.ndarray
+            Center position (x, y) in absolute pixel coordinates
+        """
+        if self.detection is None:
+            return None
+        
+        # Use the center of the bounding box from absolute coordinates
+        points = self.detection.absolute_points
+        if points is None or len(points) < 2:
+            return None
+        
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+        
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+        
+        return np.array([center_x, center_y])
+    
+    @property
+    def player_id(self) -> int:
+        """
+        Returns the player's tracking ID
+        
+        Returns
+        -------
+        int
+            Player ID, or None if not available
+        """
+        if self.detection is None:
+            return None
+        return self.detection.data.get("id", None)
+
     def distance_to_ball(self, ball: Ball) -> float:
         """
         Returns the distance between the player closest foot and the ball
@@ -148,7 +216,7 @@ class Player:
         return self.right_foot_abs
 
     def draw(
-        self, frame: PIL.Image.Image, confidence: bool = False, id: bool = False
+        self, frame: PIL.Image.Image, confidence: bool = False, id: bool = False, match: "Match" = None
     ) -> PIL.Image.Image:
         """
         Draw the player on the frame
@@ -161,6 +229,8 @@ class Player:
             Whether to draw confidence text in bounding box, by default False
         id : bool, optional
             Whether to draw id text in bounding box, by default False
+        match : Match, optional
+            Match object to get distance, by default None
 
         Returns
         -------
@@ -173,7 +243,12 @@ class Player:
         if self.team is not None:
             self.detection.data["color"] = self.team.color
 
-        return Draw.draw_detection(self.detection, frame, confidence=confidence, id=id)
+        # Get distance if match is provided and has pixels_to_meters calibration
+        distance = None
+        if match is not None and match.pixels_to_meters is not None:
+            distance = match.get_player_distance(self, in_meters=True)
+
+        return Draw.draw_detection(self.detection, frame, confidence=confidence, id=id, distance=distance)
 
     def draw_pointer(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -242,6 +317,7 @@ class Player:
         frame: PIL.Image.Image,
         confidence: bool = False,
         id: bool = False,
+        match: "Match" = None,
     ) -> PIL.Image.Image:
         """
         Draw all players on the frame
@@ -256,6 +332,8 @@ class Player:
             Whether to draw confidence text in bounding box, by default False
         id : bool, optional
             Whether to draw id text in bounding box, by default False
+        match : Match, optional
+            Match object to get distances, by default None
 
         Returns
         -------
@@ -263,7 +341,7 @@ class Player:
             Frame with players drawn
         """
         for player in players:
-            frame = player.draw(frame, confidence=confidence, id=id)
+            frame = player.draw(frame, confidence=confidence, id=id, match=match)
 
         return frame
 

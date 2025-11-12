@@ -6,5 +6,3 @@ from .hsv_classifier import HSVClassifier
 from .inertia_classifier import InertiaClassifier
 from .nn_classifier import NNClassifier
 from .yolov5 import YoloV5
-from .foul_cnn_classifier import FoulCNNClassifier
-from .card_ssd_detector import CardSSDDetector
