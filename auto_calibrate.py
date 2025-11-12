@@ -319,19 +319,46 @@ class AutoCalibrator:
                 return np.median(filtered_factors)
         
         # Fallback: Use frame dimensions as rough estimate
-        # Assume field fills most of the frame
-        # Standard field: 105m x 68m
-        # Use the larger dimension (width or height) to estimate
+        # IMPORTANT: Stabilized coordinates might be in a different scale than original frame
+        # The motion compensation might crop/scale the image, so field dimensions are uncertain
+        # Use a VERY conservative estimate to avoid overestimating distances
         
+        # Standard field: 105m x 68m
+        # We want to estimate pixels_to_meters such that:
+        # - At 30 fps, a player moving 10 px/frame should be ~0.3-0.4 m/frame (sprint speed)
+        # - That means: 10 px * pixels_to_meters = 0.3-0.4 m
+        # - So pixels_to_meters should be ~0.03-0.04 m/px for reasonable speeds
+        
+        # More conservative: Assume field is much larger in pixels than we think
+        # This will give us a smaller conversion factor (safer - underestimates rather than overestimates)
         if width > height:
-            # Landscape: width likely represents field length
-            # Estimate: field takes up 70-90% of frame width
-            estimated_field_pixels = width * 0.80
-            pixels_to_meters = 105.0 / estimated_field_pixels
+            # Landscape: assume field takes up most of the width, but be conservative
+            # Use a larger pixel estimate to get a smaller conversion factor
+            estimated_field_pixels = width * 1.2  # Assume field is larger than frame (very conservative)
         else:
-            # Portrait: height likely represents field length
-            estimated_field_pixels = height * 0.80
+            estimated_field_pixels = height * 1.2
+        
+        # Calculate conversion: meters per pixel
+        pixels_to_meters = 105.0 / estimated_field_pixels
+        
+        # Cap the conversion factor to a maximum reasonable value
+        # For realistic speeds (10 px/frame at 30 fps = 0.3 m/frame), we need pixels_to_meters <= 0.03
+        # But we'll allow up to 0.05 as a safety margin
+        max_reasonable_factor = 0.05
+        if pixels_to_meters > max_reasonable_factor:
+            # If factor is too large, use a fixed conservative estimate
+            # Assume field is at least 2500 pixels wide (very conservative)
+            estimated_field_pixels = max(width, height) * 1.5
             pixels_to_meters = 105.0 / estimated_field_pixels
+            
+            # Final cap: never exceed 0.05 m/px
+            if pixels_to_meters > max_reasonable_factor:
+                pixels_to_meters = max_reasonable_factor
+        
+        # Ensure minimum reasonable value (field shouldn't be smaller than 500 pixels)
+        min_reasonable_factor = 105.0 / 5000  # ~0.021 m/px
+        if pixels_to_meters < min_reasonable_factor:
+            pixels_to_meters = min_reasonable_factor
         
         return pixels_to_meters
     
@@ -402,12 +429,19 @@ class AutoCalibrator:
             filtered_factors = [
                 f for f in conversion_factors
                 if median_factor * 0.7 < f < median_factor * 1.3
+                # Also validate that factor is in reasonable range (much stricter)
+                and 0.01 < f < 0.05  # Very strict: 0.01 to 0.05 m/px only
             ]
             
             if filtered_factors:
                 pixels_to_meters = np.median(filtered_factors)
             else:
-                pixels_to_meters = median_factor
+                # If median is outside reasonable range, use fallback
+                if 0.01 < median_factor < 0.05:
+                    pixels_to_meters = median_factor
+                else:
+                    # Fallback to frame-based estimation
+                    pixels_to_meters = None
         else:
             # Fallback: extract one frame and use fallback estimation
             frame = self._extract_frame(str(video_path), frame_numbers_to_try[0] if frame_numbers_to_try else None)
@@ -420,18 +454,63 @@ class AutoCalibrator:
                 print("  Using fallback estimation based on frame size...")
             
             height, width = frame.shape[:2]
+            
+            # Very conservative estimate: assume field is larger in pixels than we think
+            # This gives us a smaller conversion factor (safer)
             if width > height:
-                estimated_field_pixels = width * 0.80
+                estimated_field_pixels = width * 1.2
             else:
-                estimated_field_pixels = height * 0.80
+                estimated_field_pixels = height * 1.2
+            
             pixels_to_meters = 105.0 / estimated_field_pixels
+            
+            # Cap to maximum reasonable value (0.05 m/px)
+            max_reasonable_factor = 0.05
+            if pixels_to_meters > max_reasonable_factor:
+                if verbose:
+                    print(f"  Warning: Calculated conversion factor ({pixels_to_meters:.6f}) seems too large.")
+                    print(f"  Adjusting to more conservative estimate...")
+                # Use even more conservative estimate
+                estimated_field_pixels = max(width, height) * 1.5
+                pixels_to_meters = 105.0 / estimated_field_pixels
+                
+                # Final cap
+                if pixels_to_meters > max_reasonable_factor:
+                    pixels_to_meters = max_reasonable_factor
+            
+            # Ensure minimum
+            min_reasonable_factor = 105.0 / 5000
+            if pixels_to_meters < min_reasonable_factor:
+                pixels_to_meters = min_reasonable_factor
         
-        # Cache the result
-        self._save_calibration(str(video_path), pixels_to_meters)
-        
-        if verbose:
-            print(f"✓ Calibration complete: {pixels_to_meters:.6f} m/px")
-            print(f"  (Cached for future runs)")
+        # Final validation: Ensure conversion factor is reasonable
+        if pixels_to_meters is not None:
+            # Stricter validation: factor should be between 0.01 and 0.05 m/px
+            if pixels_to_meters > 0.05:
+                if verbose:
+                    print(f"  Warning: Conversion factor ({pixels_to_meters:.6f}) is too large.")
+                    print(f"  Capping to 0.05 m/px for safety.")
+                pixels_to_meters = 0.05
+            elif pixels_to_meters < 0.01:
+                if verbose:
+                    print(f"  Warning: Conversion factor ({pixels_to_meters:.6f}) is too small.")
+                    print(f"  Setting to 0.01 m/px for safety.")
+                pixels_to_meters = 0.01
+            
+            # Cache the result
+            self._save_calibration(str(video_path), pixels_to_meters)
+            
+            if verbose:
+                print(f"✓ Calibration complete: {pixels_to_meters:.6f} m/px")
+                print(f"  Estimated: 1 pixel ≈ {pixels_to_meters*100:.2f} cm")
+                # Calculate realistic speed example
+                example_pixels_per_frame = 10
+                example_fps = 30
+                example_speed = pixels_to_meters * example_pixels_per_frame * example_fps
+                print(f"  (At {example_fps} fps, {example_pixels_per_frame} px/frame ≈ {example_speed:.1f} m/s)")
+                if example_speed > 15:
+                    print(f"  ⚠ Warning: This might overestimate distances. Consider manual calibration.")
+                print(f"  (Cached for future runs)")
         
         return pixels_to_meters
 

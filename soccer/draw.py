@@ -1,28 +1,30 @@
+from __future__ import annotations
+
 from math import sqrt
-from typing import List
+from typing import List, Optional
 
 import norfair
 import numpy as np
-import PIL
+from PIL import Image, ImageDraw, ImageFont
 
 
 class Draw:
     @staticmethod
     def draw_rectangle(
-        img: PIL.Image.Image,
+        img: Image.Image,
         origin: tuple,
         width: int,
         height: int,
         color: tuple,
         thickness: int = 2,
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
         Draw a rectangle on the image
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         origin : tuple
             Origin of the rectangle (x, y)
         width : int
@@ -36,11 +38,11 @@ class Draw:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the rectangle drawn
         """
 
-        draw = PIL.ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(img)
         draw.rectangle(
             [origin, (origin[0] + width, origin[1] + height)],
             fill=color,
@@ -50,36 +52,36 @@ class Draw:
 
     @staticmethod
     def draw_text(
-        img: PIL.Image.Image,
+        img: Image.Image,
         origin: tuple,
         text: str,
-        font: PIL.ImageFont = None,
+        font: Optional[ImageFont.FreeTypeFont] = None,
         color: tuple = (255, 255, 255),
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
         Draw text on the image
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         origin : tuple
             Origin of the text (x, y)
         text : str
             Text to draw
-        font : PIL.ImageFont
+        font : ImageFont.FreeTypeFont
             Font to use
         color : tuple, optional
             Color of the text (RGB), by default (255, 255, 255)
 
         Returns
         -------
-        PIL.Image.Image
+        Image
         """
-        draw = PIL.ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(img)
 
         if font is None:
-            font = PIL.ImageFont.truetype("fonts/Gidole-Regular.ttf", size=20)
+            font = ImageFont.truetype("fonts/Gidole-Regular.ttf", size=20)
 
         draw.text(
             origin,
@@ -92,16 +94,16 @@ class Draw:
 
     @staticmethod
     def draw_bounding_box(
-        img: PIL.Image.Image, rectangle: tuple, color: tuple, thickness: int = 3
-    ) -> PIL.Image.Image:
+        img: Image.Image, rectangle: tuple, color: tuple, thickness: int = 3
+    ) -> Image.Image:
         """
 
         Draw a bounding box on the image
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         rectangle : tuple
             Rectangle to draw ( (xmin, ymin), (xmax, ymax) )
         color : tuple
@@ -111,13 +113,13 @@ class Draw:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the bounding box drawn
         """
 
         rectangle = rectangle[0:2]
 
-        draw = PIL.ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(img)
         rectangle = [tuple(x) for x in rectangle]
         # draw.rectangle(rectangle, outline=color, width=thickness)
         draw.rounded_rectangle(rectangle, radius=7, outline=color, width=thickness)
@@ -127,11 +129,11 @@ class Draw:
     @staticmethod
     def draw_detection(
         detection: norfair.Detection,
-        img: PIL.Image.Image,
+        img: Image.Image,
         confidence: bool = False,
         id: bool = False,
         distance: float = None,
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
         Draw a bounding box on the image from a norfair.Detection
 
@@ -139,8 +141,8 @@ class Draw:
         ----------
         detection : norfair.Detection
             Detection to draw
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         confidence : bool, optional
             Whether to draw confidence in the box, by default False
         id : bool, optional
@@ -150,7 +152,7 @@ class Draw:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the bounding box drawn
         """
 
@@ -206,8 +208,8 @@ class Draw:
 
     @staticmethod
     def draw_pointer(
-        detection: norfair.Detection, img: PIL.Image.Image, color: tuple = (0, 255, 0)
-    ) -> PIL.Image.Image:
+        detection: norfair.Detection, img: Image, color: tuple = (0, 255, 0)
+    ) -> Image.Image:
         """
 
         Draw a pointer on the image from a norfair.Detection bounding box
@@ -216,14 +218,14 @@ class Draw:
         ----------
         detection : norfair.Detection
             Detection to draw
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         color : tuple, optional
             Pointer color, by default (0, 255, 0)
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the pointer drawn
         """
         if detection is None:
@@ -235,7 +237,7 @@ class Draw:
         x1, y1 = detection.points[0]
         x2, y2 = detection.points[1]
 
-        draw = PIL.ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(img)
 
         # (t_x1, t_y1)        (t_x2, t_y2)
         #   \                  /
@@ -285,15 +287,15 @@ class Draw:
 
     @staticmethod
     def rounded_rectangle(
-        img: PIL.Image.Image, rectangle: tuple, color: tuple, radius: int = 15
-    ) -> PIL.Image.Image:
+        img: Image.Image, rectangle: tuple, color: tuple, radius: int = 15
+    ) -> Image.Image:
         """
         Draw a rounded rectangle on the image
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         rectangle : tuple
             Rectangle to draw ( (xmin, ymin), (xmax, ymax) )
         color : tuple
@@ -303,31 +305,31 @@ class Draw:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the rounded rectangle drawn
         """
 
         overlay = img.copy()
-        draw = PIL.ImageDraw.Draw(overlay, "RGBA")
+        draw = ImageDraw.Draw(overlay, "RGBA")
         draw.rounded_rectangle(rectangle, radius, fill=color)
         return overlay
 
     @staticmethod
     def half_rounded_rectangle(
-        img: PIL.Image.Image,
+        img: Image.Image,
         rectangle: tuple,
         color: tuple,
         radius: int = 15,
         left: bool = False,
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
 
         Draw a half rounded rectangle on the image
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         rectangle : tuple
             Rectangle to draw ( (xmin, ymin), (xmax, ymax) )
         color : tuple
@@ -339,11 +341,11 @@ class Draw:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the half rounded rectangle drawn
         """
         overlay = img.copy()
-        draw = PIL.ImageDraw.Draw(overlay, "RGBA")
+        draw = ImageDraw.Draw(overlay, "RGBA")
         draw.rounded_rectangle(rectangle, radius, fill=color)
 
         height = rectangle[1][1] - rectangle[0][1]
@@ -373,21 +375,21 @@ class Draw:
 
     @staticmethod
     def text_in_middle_rectangle(
-        img: PIL.Image.Image,
+        img: Image.Image,
         origin: tuple,
         width: int,
         height: int,
         text: str,
-        font: PIL.ImageFont = None,
+        font: Optional[ImageFont.FreeTypeFont] = None,
         color=(255, 255, 255),
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
         Draw text in middle of rectangle
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         origin : tuple
             Origin of the rectangle (x, y)
         width : int
@@ -396,21 +398,21 @@ class Draw:
             Height of the rectangle
         text : str
             Text to draw
-        font : PIL.ImageFont, optional
+        font : ImageFont.FreeTypeFont, optional
             Font to use, by default None
         color : tuple, optional
             Color of the text, by default (255, 255, 255)
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the text drawn
         """
 
-        draw = PIL.ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(img)
 
         if font is None:
-            font = PIL.ImageFont.truetype("fonts/Gidole-Regular.ttf", size=24)
+            font = ImageFont.truetype("fonts/Gidole-Regular.ttf", size=24)
 
         bbox = draw.textbbox(xy=(0, 0), text=text, font=font)
         w = bbox[2] - bbox[0]
@@ -425,20 +427,20 @@ class Draw:
         return img
 
     @staticmethod
-    def add_alpha(img: PIL.Image.Image, alpha: int = 100) -> PIL.Image.Image:
+    def add_alpha(img: Image, alpha: int = 100) -> Image:
         """
         Add an alpha channel to an image
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         alpha : int, optional
             Alpha value, by default 100
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with alpha channel
         """
         data = img.getdata()
@@ -573,17 +575,17 @@ class AbsolutePath:
 
     def draw_path_slow(
         self,
-        img: PIL.Image.Image,
+        img: Image.Image,
         path: List[PathPoint],
         thickness: int = 4,
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
         Draw a path with alpha
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         path : List[PathPoint]
             List of points to draw
         thickness : int, optional
@@ -591,10 +593,10 @@ class AbsolutePath:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the path drawn
         """
-        draw = PIL.ImageDraw.Draw(img, "RGBA")
+        draw = ImageDraw.Draw(img, "RGBA")
 
         for i in range(len(path) - 1):
             draw.line(
@@ -606,7 +608,7 @@ class AbsolutePath:
 
     def draw_arrow_head(
         self,
-        img: PIL.Image.Image,
+        img: Image.Image,
         start: tuple,
         end: tuple,
         color: tuple = (255, 255, 255),
@@ -614,10 +616,10 @@ class AbsolutePath:
         height: int = 6,
         thickness: int = 4,
         alpha: int = 255,
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
 
         # https://stackoverflow.com/questions/43527894/drawing-arrowheads-which-follow-the-direction-of-the-line-in-pygame
-        draw = PIL.ImageDraw.Draw(img, "RGBA")
+        draw = ImageDraw.Draw(img, "RGBA")
 
         dX = end[0] - start[0]
         dY = end[1] - start[1]
@@ -665,18 +667,18 @@ class AbsolutePath:
 
     def draw_path_arrows(
         self,
-        img: PIL.Image.Image,
+        img: Image.Image,
         path: List[PathPoint],
         thickness: int = 4,
         frame_frequency: int = 30,
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
         Draw a path with arrows every 30 points
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         path : List[PathPoint]
             Path
         thickness : int, optional
@@ -684,7 +686,7 @@ class AbsolutePath:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the arrows drawn
         """
 
@@ -708,19 +710,19 @@ class AbsolutePath:
 
     def draw_path_fast(
         self,
-        img: PIL.Image.Image,
+        img: Image.Image,
         path: List[PathPoint],
         color: tuple,
         width: int = 2,
         alpha: int = 255,
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
         Draw a path without alpha (faster)
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         path : List[PathPoint]
             Path
         color : tuple
@@ -732,10 +734,10 @@ class AbsolutePath:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the path drawn
         """
-        draw = PIL.ImageDraw.Draw(img, "RGBA")
+        draw = ImageDraw.Draw(img, "RGBA")
 
         path_list = [point.center for point in path]
 
@@ -751,17 +753,17 @@ class AbsolutePath:
 
     def draw_arrow(
         self,
-        img: PIL.Image.Image,
+        img: Image.Image,
         points: List[PathPoint],
         color: tuple,
         width: int,
         alpha: int = 255,
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """Draw arrow between two points
 
         Parameters
         ----------
-        img : PIL.Image.Image
+        img : Image.Image
             image to draw
         points : List[PathPoint]
             start and end points
@@ -774,7 +776,7 @@ class AbsolutePath:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the arrow
         """
 
@@ -848,18 +850,18 @@ class AbsolutePath:
 
     def draw(
         self,
-        img: PIL.Image.Image,
+        img: Image.Image,
         detection: norfair.Detection,
         coord_transformations,
         color: tuple = (255, 255, 255),
-    ) -> PIL.Image.Image:
+    ) -> Image.Image:
         """
         Draw the path
 
         Parameters
         ----------
-        img : PIL.Image.Image
-            Image
+        img : Image.Image
+            Image.Image
         detection : norfair.Detection
             Detection
         coord_transformations : _type_
@@ -869,7 +871,7 @@ class AbsolutePath:
 
         Returns
         -------
-        PIL.Image.Image
+        Image
             Image with the path drawn
         """
 

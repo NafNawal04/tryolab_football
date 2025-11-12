@@ -198,11 +198,25 @@ fps = video.video_capture.get(cv2.CAP_PROP_FPS)
 pixels_to_meters = args.pixels_to_meters
 if pixels_to_meters is None:
     logging.info("No pixels-to-meters provided, auto-calibrating...")
-    pixels_to_meters = auto_calibrate(args.video)
+    pixels_to_meters = auto_calibrate(args.video, verbose=False)
     if pixels_to_meters is None:
         logging.warning("Auto-calibration failed. Distance tracking will use pixel units only.")
+        pixels_to_meters = None
     else:
-        logging.info(f"Auto-calibration successful: {pixels_to_meters:.6f} m/px")
+        # Validate: Conversion factor should be reasonable (0.01 to 0.05 m/px)
+        if pixels_to_meters < 0.01 or pixels_to_meters > 0.05:
+            logging.warning(f"Auto-calibration produced value ({pixels_to_meters:.6f} m/px) outside recommended range (0.01-0.05).")
+            logging.warning("This might cause incorrect distance measurements.")
+            logging.warning("Consider providing --pixels-to-meters manually for accurate results.")
+        else:
+            logging.info(f"Auto-calibration successful: {pixels_to_meters:.6f} m/px")
+            logging.info(f"  (1 pixel ≈ {pixels_to_meters*100:.2f} cm)")
+            # At 30 fps, estimate realistic speed example
+            example_pixels_per_frame = 10  # Typical movement
+            example_speed_mps = pixels_to_meters * example_pixels_per_frame * fps
+            logging.info(f"  (At {fps} fps, {example_pixels_per_frame} px/frame ≈ {example_speed_mps:.1f} m/s)")
+            if example_speed_mps > 15:
+                logging.warning(f"  ⚠ Estimated speed seems high. Consider manual calibration.")
 
 # Object Detectors
 player_detector = YoloV5()
@@ -246,6 +260,11 @@ passes_background = match.get_passes_background()
 interceptions_background = match.get_interceptions_background() if args.interceptions else None
 
 for i, frame in enumerate(video):
+    frame_number = i  # Track frame number for distance tracking
+    
+    # Reset distance tracking on first frame to ensure everyone starts at 0
+    if frame_number == 0:
+        match.reset_distance_tracking()
 
     # Get Detections
     players_detections = get_player_detections(player_detector, frame)
