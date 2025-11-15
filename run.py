@@ -122,6 +122,11 @@ parser.add_argument(
     help="Enable possession counter",
 )
 parser.add_argument(
+    "--tackles",
+    action="store_true",
+    help="Enable tackle detection and counter",
+)
+parser.add_argument(
     "--pixels-to-meters",
     type=float,
     default=None,
@@ -258,6 +263,7 @@ path = AbsolutePath()
 possession_background = match.get_possession_background()
 passes_background = match.get_passes_background()
 interceptions_background = match.get_interceptions_background() if args.interceptions else None
+tackles_background = match.get_tackles_background() if args.tackles else None
 
 for i, frame in enumerate(video):
     frame_number = i  # Track frame number for distance tracking
@@ -336,6 +342,20 @@ for i, frame in enumerate(video):
         frame = match.draw_interceptions_counter(
             frame,
             counter_background=interceptions_background,
+            debug=False,
+        )
+
+    if args.tackles:
+        # Draw active tackle attempts on field
+        frame = match.draw_active_tackles(frame, players)
+        
+        # Draw recently resolved tackles on field
+        frame = match.draw_recent_tackles(frame, players, recent_frames=60)
+        
+        # Draw tackles counter
+        frame = match.draw_tackles_counter(
+            frame,
+            counter_background=tackles_background,
             debug=False,
         )
 

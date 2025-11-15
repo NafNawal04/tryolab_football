@@ -7,560 +7,12 @@ import PIL
 from PIL import ImageDraw, ImageFont
 
 from soccer.ball import Ball
+from soccer.distance_tracker import PlayerDistanceTracker
 from soccer.draw import Draw
 from soccer.pass_event import Pass, PassEvent
 from soccer.player import Player
+from soccer.tackle_detector import TackleDetector
 from soccer.team import Team
-
-
-class PlayerDistanceTracker:
-    """
-    Tracks cumulative distance traveled by players across frames.
-    Uses stabilized coordinates (detection.points) for consistent distance calculations.
-    """
-    
-    def __init__(self, pixels_to_meters: Optional[float] = None, min_movement_threshold: float = 3.0):
-        """
-        Initialize the distance tracker.
-        
-        Parameters
-        ----------
-        pixels_to_meters : Optional[float], optional
-            Conversion factor from pixels to meters. If None, distances are in pixels.
-            For example, if 100 pixels = 1 meter, set to 0.01.
-            By default None (distances in pixels)
-        min_movement_threshold : float, optional
-            Minimum movement in pixels to count as actual movement (default: 3.0).
-            Movements smaller than this are ignored as they're likely due to:
-            - Camera/stabilization jitter
-            - Detection/tracking noise
-            This prevents false distance accumulation when players aren't actually moving.
-        """
-        # Dictionary mapping player_id -> (last_position, cumulative_distance_pixels, cumulative_distance_meters)
-        self.player_positions: Dict[int, Tuple[Optional[np.ndarray], float, float]] = {}
-        # Track which players were present in the previous frame to detect new appearances
-        self.previous_frame_players: set = set()
-        self.pixels_to_meters = pixels_to_meters
-        self.min_movement_threshold = min_movement_threshold  # Minimum pixels to count as movement
-        
-    def update_player_distance(self, player: Player) -> Tuple[float, float]:
-        """
-        Update the cumulative distance for a player based on their current position.
-        
-        Important:
-        - Players introduced in later frames start at 0 meters (last_pos is None)
-        - Small movements (< min_movement_threshold) are ignored to filter out camera/stabilization jitter
-        - Only significant movements are counted as actual player movement
-        
-        Parameters
-        ----------
-        player : Player
-            Player object with current detection
-            
-        Returns
-        -------
-        Tuple[float, float]
-            (distance_pixels, distance_meters) for this frame update.
-            If meters conversion is not set, distance_meters will be 0.0.
-            First appearance always returns (0.0, 0.0).
-        """
-        player_id = player.player_id
-        current_center = player.center
-        
-        if player_id is None or current_center is None:
-            return (0.0, 0.0)
-        
-        # Check if this player was present in the previous frame
-        # If not, this is their first appearance (or reappearance after disappearing)
-        is_new_appearance = (player_id not in self.previous_frame_players)
-        
-        # If this is a new appearance, reset their distance tracking to 0
-        # This handles both:
-        # 1. Players appearing for the very first time
-        # 2. Players reappearing after disappearing (they start fresh)
-        if is_new_appearance:
-            # Reset distance tracking for this player (start at 0)
-            last_pos = None
-            cumul_pixels = 0.0
-            cumul_meters = 0.0
-        else:
-            # Player was present in previous frame - get their last position and distances
-            last_pos, cumul_pixels, cumul_meters = self.player_positions.get(
-                player_id, (None, 0.0, 0.0)
-            )
-            # Safety check: if somehow last_pos is None but player was in previous frame,
-            # treat as new appearance
-            if last_pos is None:
-                cumul_pixels = 0.0
-                cumul_meters = 0.0
-        
-        frame_distance_pixels = 0.0
-        frame_distance_meters = 0.0
-        
-        # Only calculate distance if we have a previous position (not a new appearance)
-        if last_pos is not None:
-            # Calculate Euclidean distance in pixel space
-            frame_distance_pixels = np.linalg.norm(current_center - last_pos)
-            
-            # CRITICAL: Filter out small movements due to camera/stabilization jitter
-            # Movements smaller than min_movement_threshold are ignored
-            # This prevents false distance accumulation when players aren't actually moving
-            if frame_distance_pixels >= self.min_movement_threshold:
-                # Validate: Skip unrealistic large jumps (likely tracking errors or ID switches)
-                # At 30 fps, max realistic movement is ~5-10 pixels per frame (sprint ~12 m/s)
-                # Allow up to 50 pixels per frame as safety margin
-                max_reasonable_pixels_per_frame = 50.0
-                
-                if frame_distance_pixels <= max_reasonable_pixels_per_frame:
-                    # Valid movement - proceed with accumulation
-                    # Convert to meters if calibration is available
-                    if self.pixels_to_meters is not None:
-                        frame_distance_meters = frame_distance_pixels * self.pixels_to_meters
-                        
-                        # Validate: At 30 fps, max realistic speed is ~12 m/s (world record sprint)
-                        # That's ~0.4 m per frame. Allow up to 2 m/frame as safety margin
-                        max_reasonable_meters_per_frame = 2.0
-                        if frame_distance_meters <= max_reasonable_meters_per_frame:
-                            # Valid movement in both pixels and meters - accumulate it
-                            cumul_pixels += frame_distance_pixels
-                            cumul_meters += frame_distance_meters
-                        else:
-                            # Movement in meters is too large - likely calibration error or tracking error
-                            # Skip this frame (don't accumulate)
-                            frame_distance_pixels = 0.0
-                            frame_distance_meters = 0.0
-                    else:
-                        # No meters conversion - just accumulate pixels
-                        cumul_pixels += frame_distance_pixels
-                else:
-                    # Movement in pixels is too large - likely tracking error, ID switch, or camera jump
-                    # Skip this frame (don't accumulate false movement)
-                    frame_distance_pixels = 0.0
-            else:
-                # Movement too small - likely camera/stabilization jitter or tracking noise
-                # Don't count this as movement (frame_distance_pixels already calculated, set to 0)
-                frame_distance_pixels = 0.0
-        
-        # Update stored position and cumulative distances
-        # For first appearance (last_pos is None OR is_new_appearance), store position but keep distances at 0.0
-        self.player_positions[player_id] = (current_center.copy(), cumul_pixels, cumul_meters)
-        
-        return (frame_distance_pixels, frame_distance_meters)
-    
-    def update_frame_players(self, player_ids: set):
-        """
-        Update which players were present in the current frame.
-        This is used to detect new appearances vs. reappearances.
-        
-        Parameters
-        ----------
-        player_ids : set
-            Set of player IDs present in the current frame
-        """
-        self.previous_frame_players = player_ids.copy()
-    
-    def get_player_distance(self, player_id: int, in_meters: bool = False) -> float:
-        """
-        Get the cumulative distance traveled by a player.
-        
-        Parameters
-        ----------
-        player_id : int
-            Player ID
-        in_meters : bool, optional
-            If True, return distance in meters (requires calibration).
-            If False, return distance in pixels. By default False
-            
-        Returns
-        -------
-        float
-            Cumulative distance. Returns 0.0 if player not found or conversion unavailable.
-        """
-        if player_id not in self.player_positions:
-            return 0.0
-        
-        _, cumul_pixels, cumul_meters = self.player_positions[player_id]
-        
-        if in_meters:
-            if self.pixels_to_meters is None:
-                return 0.0
-            return cumul_meters
-        else:
-            return cumul_pixels
-    
-    def get_all_distances(self, in_meters: bool = False) -> Dict[int, float]:
-        """
-        Get cumulative distances for all tracked players.
-        
-        Parameters
-        ----------
-        in_meters : bool, optional
-            If True, return distances in meters. By default False
-            
-        Returns
-        -------
-        Dict[int, float]
-            Dictionary mapping player_id -> cumulative_distance
-        """
-        result = {}
-        for player_id in self.player_positions:
-            result[player_id] = self.get_player_distance(player_id, in_meters=in_meters)
-        return result
-    
-    def reset(self):
-        """Reset all tracked distances."""
-        self.player_positions.clear()
-        self.previous_frame_players.clear()
-
-
-class TackleAttempt:
-    """
-    Tracks a single tackle attempt lifecycle and determines outcome.
-    All thresholds are in pixel units and time is in frames.
-    """
-
-    STATE_CANDIDATE = "candidate"
-    STATE_CONTACT = "contact"
-    STATE_RESOLVE = "resolve"
-    STATE_DONE = "done"
-
-    OUTCOME_SUCCESS = "success"
-    OUTCOME_FAIL = "failure"
-    OUTCOME_INCONCLUSIVE = "inconclusive"
-
-    def __init__(
-        self,
-        start_frame: int,
-        attacker_id: int,
-        defender_id: int,
-        defender_team_name: str,
-        attacker_team_name: str,
-        horizon_frames: int,
-        confirm_frames: int,
-    ):
-        self.start_frame = start_frame
-        self.attacker_id = attacker_id
-        self.defender_id = defender_id
-        self.defender_team_name = defender_team_name
-        self.attacker_team_name = attacker_team_name
-        self.horizon_frames = horizon_frames
-        self.confirm_frames = confirm_frames
-
-        self.state = TackleAttempt.STATE_CANDIDATE
-        self.contact_frame = None
-        self.resolved_frame = None
-        self.outcome = None
-
-        # Internal persistence counters
-        self._attacker_control_frames = 0
-        self._defender_team_control_frames = 0
-        self._frames_since_contact = 0
-
-    def mark_contact(self, frame_number: int):
-        if self.state == TackleAttempt.STATE_CANDIDATE:
-            self.state = TackleAttempt.STATE_CONTACT
-            self.contact_frame = frame_number
-            self._frames_since_contact = 0
-
-    def update_resolution(
-        self,
-        frame_number: int,
-        current_possessor_id: Optional[int],
-        current_possessor_team_name: str,
-        attacker_distance_to_ball_px: float,
-        defender_distance_to_ball_px: float,
-    ):
-        if self.state not in (TackleAttempt.STATE_CONTACT, TackleAttempt.STATE_RESOLVE):
-            return
-
-        # Enter resolve state right after contact
-        if self.state == TackleAttempt.STATE_CONTACT:
-            self.state = TackleAttempt.STATE_RESOLVE
-            self._frames_since_contact = 0
-
-        self._frames_since_contact += 1
-
-        # Persistence counts
-        if current_possessor_id is not None and current_possessor_id == self.attacker_id:
-            self._attacker_control_frames += 1
-        if current_possessor_team_name == self.defender_team_name and self.defender_team_name != "":
-            self._defender_team_control_frames += 1
-
-        # Resolution rules (pixels-only, persistence based)
-        if self._defender_team_control_frames >= self.confirm_frames:
-            self._resolve(frame_number, TackleAttempt.OUTCOME_SUCCESS)
-            return
-
-        if self._attacker_control_frames >= self.confirm_frames:
-            # Attacker retained control long enough after contact → failed tackle
-            self._resolve(frame_number, TackleAttempt.OUTCOME_FAIL)
-            return
-
-        # Horizon timeout
-        if self._frames_since_contact >= self.horizon_frames:
-            self._resolve(frame_number, TackleAttempt.OUTCOME_INCONCLUSIVE)
-
-    def _resolve(self, frame_number: int, outcome: str):
-        self.state = TackleAttempt.STATE_DONE
-        self.outcome = outcome
-        self.resolved_frame = frame_number
-
-    @property
-    def is_done(self) -> bool:
-        return self.state == TackleAttempt.STATE_DONE
-
-    def as_dict(self) -> dict:
-        return {
-            "start_frame": self.start_frame,
-            "contact_frame": self.contact_frame,
-            "resolved_frame": self.resolved_frame,
-            "attacker_id": self.attacker_id,
-            "defender_id": self.defender_id,
-            "attacker_team": self.attacker_team_name,
-            "defender_team": self.defender_team_name,
-            "outcome": self.outcome or "",
-        }
-
-
-class TackleDetector:
-    """
-    Rule-based tackle detection using pixels and fps (no meters).
-    Integrates a simple FSM per attempt and uses possession flips as primary signal.
-    """
-
-    def __init__(self, fps: int):
-        self.fps = max(1, int(fps))
-
-        # Thresholds (pixels & frames)
-        self.control_radius_px = 40            # ball control radius
-        self.contact_radius_px = 25            # defender-to-ball proximity for contact
-        self.attacker_defender_close_px = 80   # attacker-defender closeness
-        self.dir_change_deg_thresh = 30.0      # ball direction change
-        self.speed_drop_ratio = 0.5            # ball speed drop (cur/prev)
-
-        # Temporal windows
-        self.confirm_frames = max(6, int(0.3 * self.fps))   # persistence to confirm state
-        self.horizon_frames = max(30, int(1.5 * self.fps))  # resolve window
-
-        # History buffers
-        self._ball_centers: List[Tuple[float, float]] = []
-        self._possessor_ids: List[Optional[int]] = []
-        self._possessor_team_names: List[str] = []
-
-        # Current active attempt and resolved attempts
-        self._active_attempt: Optional[TackleAttempt] = None
-        self._resolved_attempts: List[TackleAttempt] = []
-
-        # Internal for possessor stability (not strictly needed for outcome, but useful if extended)
-        self._last_stable_possessor_id: Optional[int] = None
-        self._stable_possessor_frames = 0
-
-    @staticmethod
-    def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-        dx = float(a[0]) - float(b[0])
-        dy = float(a[1]) - float(b[1])
-        return (dx * dx + dy * dy) ** 0.5
-
-    @staticmethod
-    def _angle_deg(v1: Tuple[float, float], v2: Tuple[float, float]) -> float:
-        import math
-        ux, uy = v1
-        vx, vy = v2
-        num = ux * vx + uy * vy
-        den = (ux * ux + uy * uy) ** 0.5 * (vx * vx + vy * vy) ** 0.5
-        if den == 0:
-            return 0.0
-        cos_t = max(-1.0, min(1.0, num / den))
-        return abs(math.degrees(math.acos(cos_t)))
-
-    def _ball_velocity(self, k: int) -> Tuple[float, float]:
-        # velocity between frames k-1 and k
-        if k <= 0 or k >= len(self._ball_centers):
-            return (0.0, 0.0)
-        x0, y0 = self._ball_centers[k - 1]
-        x1, y1 = self._ball_centers[k]
-        return (float(x1 - x0), float(y1 - y0))
-
-    def _ball_dir_change_and_speed_drop(self) -> Tuple[float, float]:
-        """
-        Returns (dir_change_deg, speed_drop_ratio) comparing last two velocity vectors.
-        """
-        k = len(self._ball_centers) - 1
-        if k < 2:
-            return (0.0, 1.0)
-        v_prev = self._ball_velocity(k - 1)
-        v_cur = self._ball_velocity(k)
-        dir_change = self._angle_deg(v_prev, v_cur)
-        prev_speed = (v_prev[0] * v_prev[0] + v_prev[1] * v_prev[1]) ** 0.5
-        cur_speed = (v_cur[0] * v_cur[0] + v_cur[1] * v_cur[1]) ** 0.5
-        drop_ratio = 1.0
-        if prev_speed > 1e-6:
-            drop_ratio = cur_speed / prev_speed
-        return (dir_change, drop_ratio)
-
-    def _update_possessor_stability(self, possessor_id: Optional[int]):
-        if possessor_id is not None and possessor_id == self._last_stable_possessor_id:
-            self._stable_possessor_frames += 1
-        elif possessor_id is not None and possessor_id != self._last_stable_possessor_id:
-            self._last_stable_possessor_id = possessor_id
-            self._stable_possessor_frames = 1
-        else:
-            # None possessor resets stability
-            self._last_stable_possessor_id = None
-            self._stable_possessor_frames = 0
-
-    def _estimate_possessor(
-        self,
-        players: List["Player"],
-        ball_center: Optional[Tuple[float, float]],
-        last_team_possession: Optional["Team"],
-    ) -> Tuple[Optional[int], str]:
-        """
-        Estimate ball possessor as closest player within control_radius_px.
-        Returns (player_id or None, team_name or "").
-        """
-        if ball_center is None or not players:
-            return (None, "")
-        best_player = None
-        best_dist = 1e9
-        for p in players:
-            if p.center is None:
-                continue
-            d = self._dist((float(p.center[0]), float(p.center[1])), (float(ball_center[0]), float(ball_center[1])))
-            if d < best_dist:
-                best_dist = d
-                best_player = p
-        if best_player is not None and best_dist <= self.control_radius_px:
-            team_name = best_player.team.name if best_player.team else (last_team_possession.name if last_team_possession else "")
-            return (best_player.player_id, team_name)
-        return (None, "")
-
-    def _select_defender_candidate(
-        self,
-        players: List["Player"],
-        attacker_id: Optional[int],
-        attacker_team_name: str,
-        ball_center: Optional[Tuple[float, float]],
-    ) -> Tuple[Optional["Player"], float, float]:
-        """
-        Select nearest opponent to ball, also close to attacker.
-        Returns (defender_player or None, dist_def_ball, dist_att_def)
-        """
-        if attacker_id is None or attacker_team_name == "" or ball_center is None:
-            return (None, 0.0, 0.0)
-        attacker = None
-        for p in players:
-            if p.player_id == attacker_id:
-                attacker = p
-                break
-        if attacker is None or attacker.center is None:
-            return (None, 0.0, 0.0)
-
-        best = None
-        best_score = 1e12
-        for p in players:
-            if p.player_id == attacker_id:
-                continue
-            if p.team and p.team.name == attacker_team_name:
-                continue
-            if p.center is None:
-                continue
-            d_ball = self._dist(
-                (float(p.center[0]), float(p.center[1])),
-                (float(ball_center[0]), float(ball_center[1])),
-            )
-            d_pair = self._dist(
-                (float(p.center[0]), float(p.center[1])),
-                (float(attacker.center[0]), float(attacker.center[1])),
-            )
-            score = d_ball + 0.5 * d_pair
-            if score < best_score:
-                best_score = score
-                best = (p, d_ball, d_pair)
-        return best if best is not None else (None, 0.0, 0.0)
-
-    def update(
-        self,
-        frame_number: int,
-        players: List["Player"],
-        ball: "Ball",
-        team_possession: Optional["Team"],
-    ):
-        # Append current observations
-        ball_center = tuple(ball.center) if ball and ball.center is not None else None
-        possessor_id, possessor_team_name = self._estimate_possessor(players, ball_center, team_possession)
-
-        self._ball_centers.append(ball_center if ball_center is not None else (0.0, 0.0))
-        self._possessor_ids.append(possessor_id)
-        self._possessor_team_names.append(possessor_team_name)
-        self._update_possessor_stability(possessor_id)
-
-        # Resolve in-progress attempt first (if any)
-        if self._active_attempt and self._active_attempt.state in (
-            TackleAttempt.STATE_CONTACT,
-            TackleAttempt.STATE_RESOLVE,
-        ):
-            # distances for context
-            att_d = 0.0
-            def_d = 0.0
-            if ball_center is not None:
-                attacker = next((p for p in players if p.player_id == self._active_attempt.attacker_id), None)
-                defender = next((p for p in players if p.player_id == self._active_attempt.defender_id), None)
-                if attacker and attacker.center is not None:
-                    att_d = self._dist((float(attacker.center[0]), float(attacker.center[1])), (float(ball_center[0]), float(ball_center[1])))
-                if defender and defender.center is not None:
-                    def_d = self._dist((float(defender.center[0]), float(defender.center[1])), (float(ball_center[0]), float(ball_center[1])))
-
-            self._active_attempt.update_resolution(
-                frame_number=frame_number,
-                current_possessor_id=possessor_id,
-                current_possessor_team_name=possessor_team_name,
-                attacker_distance_to_ball_px=att_d,
-                defender_distance_to_ball_px=def_d,
-            )
-            if self._active_attempt.is_done:
-                self._resolved_attempts.append(self._active_attempt)
-                self._active_attempt = None
-
-        # If there is no active attempt, try to start one
-        if self._active_attempt is None:
-            attacker_id = possessor_id
-            attacker_team_name = possessor_team_name
-            if attacker_id is not None and attacker_team_name != "" and ball_center is not None:
-                defender, dist_def_ball, dist_att_def = self._select_defender_candidate(
-                    players, attacker_id, attacker_team_name, ball_center
-                )
-                if defender is not None:
-                    # Proximity checks
-                    close_enough = (
-                        dist_att_def <= self.attacker_defender_close_px
-                        and dist_def_ball <= self.contact_radius_px
-                    )
-
-                    # Kinematic cue: direction change or speed drop
-                    dir_change_deg, drop_ratio = self._ball_dir_change_and_speed_drop()
-                    kinematic_contact = (
-                        dir_change_deg >= self.dir_change_deg_thresh or drop_ratio <= self.speed_drop_ratio
-                    )
-
-                    if close_enough and kinematic_contact:
-                        attempt = TackleAttempt(
-                            start_frame=frame_number,
-                            attacker_id=attacker_id,
-                            defender_id=defender.player_id,
-                            defender_team_name=defender.team.name if defender.team else "",
-                            attacker_team_name=attacker_team_name,
-                            horizon_frames=self.horizon_frames,
-                            confirm_frames=self.confirm_frames,
-                        )
-                        attempt.mark_contact(frame_number)
-                        self._active_attempt = attempt
-
-    def get_resolved(self) -> List[dict]:
-        return [a.as_dict() for a in self._resolved_attempts]
-
-    def get_active(self) -> Optional[dict]:
-        return self._active_attempt.as_dict() if self._active_attempt else None
 
 
 class Match:
@@ -1072,6 +524,35 @@ class Match:
 
         return background
 
+    def get_tackles_background(self) -> PIL.Image.Image:
+        """
+        Get tackles counter background
+
+        Returns
+        -------
+        PIL.Image.Image
+            Counter background
+        """
+
+        width = int(315 * 1.2)
+        height = int(210 * 1.2)
+        background = PIL.Image.new("RGBA", (width, height), (10, 14, 28, 220))
+        draw = ImageDraw.Draw(background)
+
+        title_font = self._load_font(size=34)
+        subtitle_font = self._load_font(size=22)
+
+        def _draw_centered(text: str, y: int, font: ImageFont.ImageFont):
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            x = (width - text_width) // 2
+            draw.text((x, y), text, font=font, fill=(255, 255, 255, 235))
+
+        _draw_centered("TACKLES", 24, title_font)
+        _draw_centered("SUCCESS / FAILED", 74, subtitle_font)
+
+        return background
+
     def draw_counter_background(
         self,
         frame: PIL.Image.Image,
@@ -1372,6 +853,381 @@ class Match:
 
         if debug:
             frame = self.draw_debug(frame=frame)
+
+        return frame
+
+    def draw_tackles_counter(
+        self,
+        frame: PIL.Image.Image,
+        counter_background: PIL.Image.Image,
+        debug: bool = False,
+    ) -> PIL.Image.Image:
+        """
+        Draw elements of the tackles in frame
+
+        Parameters
+        ----------
+        frame : PIL.Image.Image
+            Frame
+        counter_background : PIL.Image.Image
+            Counter background
+        debug : bool, optional
+            Whether to draw extra debug information, by default False
+
+        Returns
+        -------
+        PIL.Image.Image
+            Frame with tackles elements
+        """
+
+        frame_width = frame.size[0]
+        frame_height = frame.size[1]
+        margin_bottom = 40
+        margin_left = 40
+        background_height = counter_background.size[1]
+
+        counter_origin_y = frame_height - background_height - margin_bottom
+        counter_origin = (margin_left, counter_origin_y)
+
+        frame = self.draw_counter_background(
+            frame,
+            origin=counter_origin,
+            counter_background=counter_background,
+        )
+
+        # Count tackles by team and outcome
+        # Note: defender_team is the team that made the tackle
+        home_successful = sum(1 for t in self.tackles if t.get('defender_team') == self.home.name and t.get('outcome') == 'success')
+        home_failed = sum(1 for t in self.tackles if t.get('defender_team') == self.home.name and t.get('outcome') == 'failure')
+        away_successful = sum(1 for t in self.tackles if t.get('defender_team') == self.away.name and t.get('outcome') == 'success')
+        away_failed = sum(1 for t in self.tackles if t.get('defender_team') == self.away.name and t.get('outcome') == 'failure')
+
+        successful_row_y = counter_origin[1] + 115
+        failed_row_y = counter_origin[1] + 170
+        bar_origin_y = counter_origin[1] + 210
+
+        # Successful tackles row - show both teams
+        frame = self.draw_counter(
+            frame,
+            origin=(counter_origin[0] + 35, successful_row_y),
+            text="Successful",
+            counter_text=f"{self.home.abbreviation} [{home_successful}] {self.away.abbreviation} [{away_successful}]",
+            color=(0, 200, 0),  # Green for successful
+            text_color=(255, 255, 255),
+            height=31,
+            width=310,
+        )
+
+        # Failed tackles row - show both teams
+        frame = self.draw_counter(
+            frame,
+            origin=(counter_origin[0] + 35, failed_row_y),
+            text="Failed",
+            counter_text=f"{self.home.abbreviation} [{home_failed}] {self.away.abbreviation} [{away_failed}]",
+            color=(200, 0, 0),  # Red for failed
+            text_color=(255, 255, 255),
+            height=31,
+            width=310,
+        )
+
+        # Bar showing ratio
+        total_tackles = len(self.tackles)
+        if total_tackles > 0:
+            home_total = home_successful + home_failed
+            home_ratio = home_total / total_tackles
+        else:
+            home_ratio = 0.5
+
+        if home_ratio < 0.07:
+            home_ratio = 0.07
+        if home_ratio > 0.93:
+            home_ratio = 0.93
+
+        bar_x = counter_origin[0] + 35
+        bar_y = bar_origin_y
+        bar_height = 29
+        bar_width = 310
+
+        left_rectangle = (
+            (bar_x, bar_y),
+            [int(bar_x + home_ratio * bar_width), int(bar_y + bar_height)],
+        )
+
+        right_rectangle = (
+            [int(bar_x + home_ratio * bar_width), bar_y],
+            [int(bar_x + bar_width), int(bar_y + bar_height)],
+        )
+
+        frame = self.draw_counter_rectangle(
+            frame=frame,
+            ratio=home_ratio,
+            left_rectangle=left_rectangle,
+            left_color=self.home.board_color,
+            right_rectangle=right_rectangle,
+            right_color=self.away.board_color,
+        )
+
+        if home_ratio > 0.15:
+            home_text = f"{int(home_ratio * 100)}%"
+            frame = Draw.text_in_middle_rectangle(
+                img=frame,
+                origin=left_rectangle[0],
+                width=left_rectangle[1][0] - left_rectangle[0][0],
+                height=left_rectangle[1][1] - left_rectangle[0][1],
+                text=home_text,
+                color=self.home.text_color,
+            )
+
+        if home_ratio < 0.85:
+            away_text = f"{int((1 - home_ratio) * 100)}%"
+            frame = Draw.text_in_middle_rectangle(
+                img=frame,
+                origin=right_rectangle[0],
+                width=right_rectangle[1][0] - right_rectangle[0][0],
+                height=right_rectangle[1][1] - right_rectangle[0][1],
+                text=away_text,
+                color=self.away.text_color,
+            )
+
+        if debug:
+            frame = self.draw_debug(frame=frame)
+
+        return frame
+
+    def draw_active_tackles(
+        self,
+        frame: PIL.Image.Image,
+        players: List[Player],
+    ) -> PIL.Image.Image:
+        """
+        Draw active tackle attempts on the field.
+        Shows a line between attacker and defender with color indicating status.
+
+        Parameters
+        ----------
+        frame : PIL.Image.Image
+            Frame
+        players : List[Player]
+            Current list of players
+
+        Returns
+        -------
+        PIL.Image.Image
+            Frame with active tackle indicators
+        """
+        active = self.get_active_tackle()
+        if active is None:
+            return frame
+
+        # Create mapping of player_id -> Player
+        player_map = {p.player_id: p for p in players if p.player_id is not None}
+
+        attacker_id = active.get('attacker_id')
+        defender_id = active.get('defender_id')
+
+        attacker = player_map.get(attacker_id) if attacker_id is not None else None
+        defender = player_map.get(defender_id) if defender_id is not None else None
+
+        if attacker is None or defender is None:
+            return frame
+
+        # Get player centers
+        attacker_center = attacker.center
+        defender_center = defender.center
+
+        if attacker_center is None or defender_center is None:
+            return frame
+
+        # Convert to tuple for drawing
+        attacker_pos = (int(attacker_center[0]), int(attacker_center[1]))
+        defender_pos = (int(defender_center[0]), int(defender_center[1]))
+
+        draw = ImageDraw.Draw(frame)
+
+        # Color based on state: orange for contact (active tackle)
+        state = active.get('state', 'contact')
+        if state == 'contact':
+            line_color = (255, 165, 0)  # Orange - active tackle
+            line_width = 3
+        elif state == 'resolve':
+            line_color = (255, 0, 0)  # Red - resolving
+            line_width = 4
+        else:
+            line_color = (200, 200, 200)  # Gray
+            line_width = 2
+
+        # Draw line between attacker and defender
+        draw.line([attacker_pos, defender_pos], fill=line_color, width=line_width)
+
+        # Draw circles at player positions
+        circle_radius = 8
+        draw.ellipse(
+            [
+                attacker_pos[0] - circle_radius,
+                attacker_pos[1] - circle_radius,
+                attacker_pos[0] + circle_radius,
+                attacker_pos[1] + circle_radius,
+            ],
+            outline=line_color,
+            width=2,
+        )
+        draw.ellipse(
+            [
+                defender_pos[0] - circle_radius,
+                defender_pos[1] - circle_radius,
+                defender_pos[0] + circle_radius,
+                defender_pos[1] + circle_radius,
+            ],
+            outline=line_color,
+            width=2,
+        )
+
+        # Draw label near defender showing state
+        label_font = self._load_font(size=16)
+        label_text = f"Tackle: {state}"
+        bbox = draw.textbbox((0, 0), label_text, font=label_font)
+        label_width = bbox[2] - bbox[0]
+        label_height = bbox[3] - bbox[1]
+        label_x = defender_pos[0] - label_width // 2
+        label_y = defender_pos[1] - label_height - 15
+
+        # Draw background for label
+        padding = 4
+        draw.rectangle(
+            [
+                label_x - padding,
+                label_y - padding,
+                label_x + label_width + padding,
+                label_y + label_height + padding,
+            ],
+            fill=(0, 0, 0, 180),
+        )
+        draw.text((label_x, label_y), label_text, font=label_font, fill=line_color)
+
+        return frame
+
+    def draw_recent_tackles(
+        self,
+        frame: PIL.Image.Image,
+        players: List[Player],
+        recent_frames: int = 60,
+    ) -> PIL.Image.Image:
+        """
+        Draw recently resolved tackles on the field.
+        Shows outcome with colored indicators.
+
+        Parameters
+        ----------
+        frame : PIL.Image.Image
+            Frame
+        players : List[Player]
+            Current list of players
+        recent_frames : int, optional
+            Number of frames to show recent tackles (default: 60, ~2 seconds at 30fps)
+
+        Returns
+        -------
+        PIL.Image.Image
+            Frame with recent tackle indicators
+        """
+        if self.frame_number == 0:
+            return frame
+
+        # Get recent tackles (resolved in last N frames)
+        recent_tackles = [
+            t for t in self.tackles
+            if t.get('resolved_frame') is not None 
+            and self.frame_number - recent_frames <= t.get('resolved_frame', 0) <= self.frame_number
+        ]
+
+        if not recent_tackles:
+            return frame
+
+        # Create mapping of player_id -> Player
+        player_map = {p.player_id: p for p in players if p.player_id is not None}
+
+        draw = ImageDraw.Draw(frame)
+        label_font = self._load_font(size=14)
+
+        for tackle in recent_tackles[-3:]:  # Show max 3 most recent
+            attacker_id = tackle.get('attacker_id')
+            defender_id = tackle.get('defender_id')
+            outcome = tackle.get('outcome', 'inconclusive')
+
+            attacker = player_map.get(attacker_id) if attacker_id is not None else None
+            defender = player_map.get(defender_id) if defender_id is not None else None
+
+            if attacker is None or defender is None:
+                continue
+
+            attacker_center = attacker.center
+            defender_center = defender.center
+
+            if attacker_center is None or defender_center is None:
+                continue
+
+            attacker_pos = (int(attacker_center[0]), int(attacker_center[1]))
+            defender_pos = (int(defender_center[0]), int(defender_center[1]))
+
+            # Color based on outcome
+            if outcome == 'success':
+                line_color = (0, 255, 0)  # Green
+                outcome_text = "✓ SUCCESS"
+            elif outcome == 'failure':
+                line_color = (255, 0, 0)  # Red
+                outcome_text = "✗ FAILED"
+            else:
+                line_color = (128, 128, 128)  # Gray
+                outcome_text = "? INCONCLUSIVE"
+
+            # Draw dashed line (simulated with small segments)
+            line_width = 2
+            segment_length = 10
+            gap_length = 5
+            dx = defender_pos[0] - attacker_pos[0]
+            dy = defender_pos[1] - attacker_pos[1]
+            distance = np.sqrt(dx**2 + dy**2)
+            
+            if distance > 0:
+                unit_x = dx / distance
+                unit_y = dy / distance
+                num_segments = int(distance / (segment_length + gap_length))
+                
+                for i in range(num_segments):
+                    start_ratio = i * (segment_length + gap_length) / distance
+                    end_ratio = (i * (segment_length + gap_length) + segment_length) / distance
+                    if end_ratio > 1.0:
+                        end_ratio = 1.0
+                    
+                    start_x = int(attacker_pos[0] + start_ratio * dx)
+                    start_y = int(attacker_pos[1] + start_ratio * dy)
+                    end_x = int(attacker_pos[0] + end_ratio * dx)
+                    end_y = int(attacker_pos[1] + end_ratio * dy)
+                    
+                    draw.line([(start_x, start_y), (end_x, end_y)], fill=line_color, width=line_width)
+
+            # Draw outcome label near midpoint
+            mid_x = (attacker_pos[0] + defender_pos[0]) // 2
+            mid_y = (attacker_pos[1] + defender_pos[1]) // 2
+
+            bbox = draw.textbbox((0, 0), outcome_text, font=label_font)
+            label_width = bbox[2] - bbox[0]
+            label_height = bbox[3] - bbox[1]
+            label_x = mid_x - label_width // 2
+            label_y = mid_y - label_height - 10
+
+            # Draw background for label
+            padding = 4
+            draw.rectangle(
+                [
+                    label_x - padding,
+                    label_y - padding,
+                    label_x + label_width + padding,
+                    label_y + label_height + padding,
+                ],
+                fill=(0, 0, 0, 200),
+            )
+            draw.text((label_x, label_y), outcome_text, font=label_font, fill=line_color)
 
         return frame
 
