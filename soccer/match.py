@@ -213,6 +213,356 @@ class PlayerDistanceTracker:
         self.previous_frame_players.clear()
 
 
+class TackleAttempt:
+    """
+    Tracks a single tackle attempt lifecycle and determines outcome.
+    All thresholds are in pixel units and time is in frames.
+    """
+
+    STATE_CANDIDATE = "candidate"
+    STATE_CONTACT = "contact"
+    STATE_RESOLVE = "resolve"
+    STATE_DONE = "done"
+
+    OUTCOME_SUCCESS = "success"
+    OUTCOME_FAIL = "failure"
+    OUTCOME_INCONCLUSIVE = "inconclusive"
+
+    def __init__(
+        self,
+        start_frame: int,
+        attacker_id: int,
+        defender_id: int,
+        defender_team_name: str,
+        attacker_team_name: str,
+        horizon_frames: int,
+        confirm_frames: int,
+    ):
+        self.start_frame = start_frame
+        self.attacker_id = attacker_id
+        self.defender_id = defender_id
+        self.defender_team_name = defender_team_name
+        self.attacker_team_name = attacker_team_name
+        self.horizon_frames = horizon_frames
+        self.confirm_frames = confirm_frames
+
+        self.state = TackleAttempt.STATE_CANDIDATE
+        self.contact_frame = None
+        self.resolved_frame = None
+        self.outcome = None
+
+        # Internal persistence counters
+        self._attacker_control_frames = 0
+        self._defender_team_control_frames = 0
+        self._frames_since_contact = 0
+
+    def mark_contact(self, frame_number: int):
+        if self.state == TackleAttempt.STATE_CANDIDATE:
+            self.state = TackleAttempt.STATE_CONTACT
+            self.contact_frame = frame_number
+            self._frames_since_contact = 0
+
+    def update_resolution(
+        self,
+        frame_number: int,
+        current_possessor_id: Optional[int],
+        current_possessor_team_name: str,
+        attacker_distance_to_ball_px: float,
+        defender_distance_to_ball_px: float,
+    ):
+        if self.state not in (TackleAttempt.STATE_CONTACT, TackleAttempt.STATE_RESOLVE):
+            return
+
+        # Enter resolve state right after contact
+        if self.state == TackleAttempt.STATE_CONTACT:
+            self.state = TackleAttempt.STATE_RESOLVE
+            self._frames_since_contact = 0
+
+        self._frames_since_contact += 1
+
+        # Persistence counts
+        if current_possessor_id is not None and current_possessor_id == self.attacker_id:
+            self._attacker_control_frames += 1
+        if current_possessor_team_name == self.defender_team_name and self.defender_team_name != "":
+            self._defender_team_control_frames += 1
+
+        # Resolution rules (pixels-only, persistence based)
+        if self._defender_team_control_frames >= self.confirm_frames:
+            self._resolve(frame_number, TackleAttempt.OUTCOME_SUCCESS)
+            return
+
+        if self._attacker_control_frames >= self.confirm_frames:
+            # Attacker retained control long enough after contact → failed tackle
+            self._resolve(frame_number, TackleAttempt.OUTCOME_FAIL)
+            return
+
+        # Horizon timeout
+        if self._frames_since_contact >= self.horizon_frames:
+            self._resolve(frame_number, TackleAttempt.OUTCOME_INCONCLUSIVE)
+
+    def _resolve(self, frame_number: int, outcome: str):
+        self.state = TackleAttempt.STATE_DONE
+        self.outcome = outcome
+        self.resolved_frame = frame_number
+
+    @property
+    def is_done(self) -> bool:
+        return self.state == TackleAttempt.STATE_DONE
+
+    def as_dict(self) -> dict:
+        return {
+            "start_frame": self.start_frame,
+            "contact_frame": self.contact_frame,
+            "resolved_frame": self.resolved_frame,
+            "attacker_id": self.attacker_id,
+            "defender_id": self.defender_id,
+            "attacker_team": self.attacker_team_name,
+            "defender_team": self.defender_team_name,
+            "outcome": self.outcome or "",
+        }
+
+
+class TackleDetector:
+    """
+    Rule-based tackle detection using pixels and fps (no meters).
+    Integrates a simple FSM per attempt and uses possession flips as primary signal.
+    """
+
+    def __init__(self, fps: int):
+        self.fps = max(1, int(fps))
+
+        # Thresholds (pixels & frames)
+        self.control_radius_px = 40            # ball control radius
+        self.contact_radius_px = 25            # defender-to-ball proximity for contact
+        self.attacker_defender_close_px = 80   # attacker-defender closeness
+        self.dir_change_deg_thresh = 30.0      # ball direction change
+        self.speed_drop_ratio = 0.5            # ball speed drop (cur/prev)
+
+        # Temporal windows
+        self.confirm_frames = max(6, int(0.3 * self.fps))   # persistence to confirm state
+        self.horizon_frames = max(30, int(1.5 * self.fps))  # resolve window
+
+        # History buffers
+        self._ball_centers: List[Tuple[float, float]] = []
+        self._possessor_ids: List[Optional[int]] = []
+        self._possessor_team_names: List[str] = []
+
+        # Current active attempt and resolved attempts
+        self._active_attempt: Optional[TackleAttempt] = None
+        self._resolved_attempts: List[TackleAttempt] = []
+
+        # Internal for possessor stability (not strictly needed for outcome, but useful if extended)
+        self._last_stable_possessor_id: Optional[int] = None
+        self._stable_possessor_frames = 0
+
+    @staticmethod
+    def _dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+        dx = float(a[0]) - float(b[0])
+        dy = float(a[1]) - float(b[1])
+        return (dx * dx + dy * dy) ** 0.5
+
+    @staticmethod
+    def _angle_deg(v1: Tuple[float, float], v2: Tuple[float, float]) -> float:
+        import math
+        ux, uy = v1
+        vx, vy = v2
+        num = ux * vx + uy * vy
+        den = (ux * ux + uy * uy) ** 0.5 * (vx * vx + vy * vy) ** 0.5
+        if den == 0:
+            return 0.0
+        cos_t = max(-1.0, min(1.0, num / den))
+        return abs(math.degrees(math.acos(cos_t)))
+
+    def _ball_velocity(self, k: int) -> Tuple[float, float]:
+        # velocity between frames k-1 and k
+        if k <= 0 or k >= len(self._ball_centers):
+            return (0.0, 0.0)
+        x0, y0 = self._ball_centers[k - 1]
+        x1, y1 = self._ball_centers[k]
+        return (float(x1 - x0), float(y1 - y0))
+
+    def _ball_dir_change_and_speed_drop(self) -> Tuple[float, float]:
+        """
+        Returns (dir_change_deg, speed_drop_ratio) comparing last two velocity vectors.
+        """
+        k = len(self._ball_centers) - 1
+        if k < 2:
+            return (0.0, 1.0)
+        v_prev = self._ball_velocity(k - 1)
+        v_cur = self._ball_velocity(k)
+        dir_change = self._angle_deg(v_prev, v_cur)
+        prev_speed = (v_prev[0] * v_prev[0] + v_prev[1] * v_prev[1]) ** 0.5
+        cur_speed = (v_cur[0] * v_cur[0] + v_cur[1] * v_cur[1]) ** 0.5
+        drop_ratio = 1.0
+        if prev_speed > 1e-6:
+            drop_ratio = cur_speed / prev_speed
+        return (dir_change, drop_ratio)
+
+    def _update_possessor_stability(self, possessor_id: Optional[int]):
+        if possessor_id is not None and possessor_id == self._last_stable_possessor_id:
+            self._stable_possessor_frames += 1
+        elif possessor_id is not None and possessor_id != self._last_stable_possessor_id:
+            self._last_stable_possessor_id = possessor_id
+            self._stable_possessor_frames = 1
+        else:
+            # None possessor resets stability
+            self._last_stable_possessor_id = None
+            self._stable_possessor_frames = 0
+
+    def _estimate_possessor(
+        self,
+        players: List["Player"],
+        ball_center: Optional[Tuple[float, float]],
+        last_team_possession: Optional["Team"],
+    ) -> Tuple[Optional[int], str]:
+        """
+        Estimate ball possessor as closest player within control_radius_px.
+        Returns (player_id or None, team_name or "").
+        """
+        if ball_center is None or not players:
+            return (None, "")
+        best_player = None
+        best_dist = 1e9
+        for p in players:
+            if p.center is None:
+                continue
+            d = self._dist((float(p.center[0]), float(p.center[1])), (float(ball_center[0]), float(ball_center[1])))
+            if d < best_dist:
+                best_dist = d
+                best_player = p
+        if best_player is not None and best_dist <= self.control_radius_px:
+            team_name = best_player.team.name if best_player.team else (last_team_possession.name if last_team_possession else "")
+            return (best_player.player_id, team_name)
+        return (None, "")
+
+    def _select_defender_candidate(
+        self,
+        players: List["Player"],
+        attacker_id: Optional[int],
+        attacker_team_name: str,
+        ball_center: Optional[Tuple[float, float]],
+    ) -> Tuple[Optional["Player"], float, float]:
+        """
+        Select nearest opponent to ball, also close to attacker.
+        Returns (defender_player or None, dist_def_ball, dist_att_def)
+        """
+        if attacker_id is None or attacker_team_name == "" or ball_center is None:
+            return (None, 0.0, 0.0)
+        attacker = None
+        for p in players:
+            if p.player_id == attacker_id:
+                attacker = p
+                break
+        if attacker is None or attacker.center is None:
+            return (None, 0.0, 0.0)
+
+        best = None
+        best_score = 1e12
+        for p in players:
+            if p.player_id == attacker_id:
+                continue
+            if p.team and p.team.name == attacker_team_name:
+                continue
+            if p.center is None:
+                continue
+            d_ball = self._dist(
+                (float(p.center[0]), float(p.center[1])),
+                (float(ball_center[0]), float(ball_center[1])),
+            )
+            d_pair = self._dist(
+                (float(p.center[0]), float(p.center[1])),
+                (float(attacker.center[0]), float(attacker.center[1])),
+            )
+            score = d_ball + 0.5 * d_pair
+            if score < best_score:
+                best_score = score
+                best = (p, d_ball, d_pair)
+        return best if best is not None else (None, 0.0, 0.0)
+
+    def update(
+        self,
+        frame_number: int,
+        players: List["Player"],
+        ball: "Ball",
+        team_possession: Optional["Team"],
+    ):
+        # Append current observations
+        ball_center = tuple(ball.center) if ball and ball.center is not None else None
+        possessor_id, possessor_team_name = self._estimate_possessor(players, ball_center, team_possession)
+
+        self._ball_centers.append(ball_center if ball_center is not None else (0.0, 0.0))
+        self._possessor_ids.append(possessor_id)
+        self._possessor_team_names.append(possessor_team_name)
+        self._update_possessor_stability(possessor_id)
+
+        # Resolve in-progress attempt first (if any)
+        if self._active_attempt and self._active_attempt.state in (
+            TackleAttempt.STATE_CONTACT,
+            TackleAttempt.STATE_RESOLVE,
+        ):
+            # distances for context
+            att_d = 0.0
+            def_d = 0.0
+            if ball_center is not None:
+                attacker = next((p for p in players if p.player_id == self._active_attempt.attacker_id), None)
+                defender = next((p for p in players if p.player_id == self._active_attempt.defender_id), None)
+                if attacker and attacker.center is not None:
+                    att_d = self._dist((float(attacker.center[0]), float(attacker.center[1])), (float(ball_center[0]), float(ball_center[1])))
+                if defender and defender.center is not None:
+                    def_d = self._dist((float(defender.center[0]), float(defender.center[1])), (float(ball_center[0]), float(ball_center[1])))
+
+            self._active_attempt.update_resolution(
+                frame_number=frame_number,
+                current_possessor_id=possessor_id,
+                current_possessor_team_name=possessor_team_name,
+                attacker_distance_to_ball_px=att_d,
+                defender_distance_to_ball_px=def_d,
+            )
+            if self._active_attempt.is_done:
+                self._resolved_attempts.append(self._active_attempt)
+                self._active_attempt = None
+
+        # If there is no active attempt, try to start one
+        if self._active_attempt is None:
+            attacker_id = possessor_id
+            attacker_team_name = possessor_team_name
+            if attacker_id is not None and attacker_team_name != "" and ball_center is not None:
+                defender, dist_def_ball, dist_att_def = self._select_defender_candidate(
+                    players, attacker_id, attacker_team_name, ball_center
+                )
+                if defender is not None:
+                    # Proximity checks
+                    close_enough = (
+                        dist_att_def <= self.attacker_defender_close_px
+                        and dist_def_ball <= self.contact_radius_px
+                    )
+
+                    # Kinematic cue: direction change or speed drop
+                    dir_change_deg, drop_ratio = self._ball_dir_change_and_speed_drop()
+                    kinematic_contact = (
+                        dir_change_deg >= self.dir_change_deg_thresh or drop_ratio <= self.speed_drop_ratio
+                    )
+
+                    if close_enough and kinematic_contact:
+                        attempt = TackleAttempt(
+                            start_frame=frame_number,
+                            attacker_id=attacker_id,
+                            defender_id=defender.player_id,
+                            defender_team_name=defender.team.name if defender.team else "",
+                            attacker_team_name=attacker_team_name,
+                            horizon_frames=self.horizon_frames,
+                            confirm_frames=self.confirm_frames,
+                        )
+                        attempt.mark_contact(frame_number)
+                        self._active_attempt = attempt
+
+    def get_resolved(self) -> List[dict]:
+        return [a.as_dict() for a in self._resolved_attempts]
+
+    def get_active(self) -> Optional[dict]:
+        return self._active_attempt.as_dict() if self._active_attempt else None
+
+
 class Match:
     def __init__(
         self,
@@ -258,6 +608,9 @@ class Match:
         # Distance tracking
         self.pixels_to_meters = pixels_to_meters
         self.distance_tracker = PlayerDistanceTracker(pixels_to_meters=pixels_to_meters)
+        # Tackle detection (pixels + fps only)
+        self.tackle_detector = TackleDetector(fps=fps)
+        self.tackles: List[dict] = []
 
     def _load_font(self, size: int) -> ImageFont.ImageFont:
         font_path = Path(__file__).resolve().parent.parent / "fonts" / "Gidole-Regular.ttf"
@@ -327,6 +680,22 @@ class Match:
         self.pass_event.process_pass()
 
         self.frame_number += 1
+
+        # Tackle detector update (safe-guarded)
+        try:
+            self.tackle_detector.update(
+                frame_number=self.frame_number,
+                players=players,
+                ball=ball,
+                team_possession=self.team_possession,
+            )
+            # Sync resolved tackles
+            resolved_now = self.tackle_detector.get_resolved()
+            if len(resolved_now) > len(self.tackles):
+                self.tackles = resolved_now.copy()
+        except Exception:
+            # Never break the main pipeline
+            pass
 
     def change_team(self, team: Team):
         """
@@ -1291,3 +1660,20 @@ class Match:
         Reset all distance tracking data.
         """
         self.distance_tracker.reset()
+
+    # ---------------- Tackle accessors ----------------
+    def get_tackles(self) -> List[dict]:
+        """
+        Return list of resolved tackle events:
+        [{
+          'start_frame', 'contact_frame', 'resolved_frame',
+          'attacker_id', 'defender_id', 'attacker_team', 'defender_team', 'outcome'
+        }, ...]
+        """
+        return self.tackles
+
+    def get_active_tackle(self) -> Optional[dict]:
+        """
+        Return the currently active (unresolved) tackle attempt as dict, or None.
+        """
+        return self.tackle_detector.get_active()
