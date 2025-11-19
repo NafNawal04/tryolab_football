@@ -11,6 +11,7 @@ from soccer.distance_tracker import PlayerDistanceTracker
 from soccer.draw import Draw
 from soccer.pass_event import Pass, PassEvent
 from soccer.player import Player
+from soccer.set_piece_detector import SetPieceDetector
 from soccer.tackle_detector import TackleDetector
 from soccer.team import Team
 
@@ -63,6 +64,9 @@ class Match:
         # Tackle detection (pixels + fps only)
         self.tackle_detector = TackleDetector(fps=fps)
         self.tackles: List[dict] = []
+        # Set piece detection
+        self.set_piece_detector = SetPieceDetector(fps=fps)
+        self.set_pieces: List[dict] = []
 
     def _load_font(self, size: int) -> ImageFont.ImageFont:
         font_path = Path(__file__).resolve().parent.parent / "fonts" / "Gidole-Regular.ttf"
@@ -145,6 +149,23 @@ class Match:
             resolved_now = self.tackle_detector.get_resolved()
             if len(resolved_now) > len(self.tackles):
                 self.tackles = resolved_now.copy()
+        except Exception:
+            # Never break the main pipeline
+            pass
+        
+        # Set piece detector update (safe-guarded)
+        try:
+            self.set_piece_detector.update(
+                frame_number=self.frame_number,
+                players=players,
+                ball=ball,
+                team_possession=self.team_possession,
+                closest_player=self.closest_player,
+            )
+            # Sync resolved set pieces
+            resolved_now = self.set_piece_detector.get_resolved()
+            if len(resolved_now) > len(self.set_pieces):
+                self.set_pieces = resolved_now.copy()
         except Exception:
             # Never break the main pipeline
             pass
@@ -1533,3 +1554,20 @@ class Match:
         Return the currently active (unresolved) tackle attempt as dict, or None.
         """
         return self.tackle_detector.get_active()
+    
+    # ---------------- Set piece accessors ----------------
+    def get_set_pieces(self) -> List[dict]:
+        """
+        Return list of resolved set piece events:
+        [{
+          'start_frame', 'wall_detected_frame', 'ball_kicked_frame', 'resolved_frame',
+          'attacking_team', 'defending_team', 'type', 'wall_player_count'
+        }, ...]
+        """
+        return self.set_pieces
+    
+    def get_active_set_piece(self) -> Optional[dict]:
+        """
+        Return the currently active (unresolved) set piece as dict, or None.
+        """
+        return self.set_piece_detector.get_active()

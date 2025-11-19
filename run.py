@@ -127,6 +127,11 @@ parser.add_argument(
     help="Enable tackle detection and counter",
 )
 parser.add_argument(
+    "--set-pieces",
+    action="store_true",
+    help="Enable set piece detection (corners, free kicks)",
+)
+parser.add_argument(
     "--pixels-to-meters",
     type=float,
     default=None,
@@ -358,6 +363,29 @@ for i, frame in enumerate(video):
             counter_background=tackles_background,
             debug=False,
         )
+
+    if args.set_pieces:
+        # Log set piece information
+        active_set_piece = match.get_active_set_piece()
+        if active_set_piece:
+            set_piece_type = active_set_piece.get('type', 'detecting')
+            logging.debug(
+                f"Frame {frame_number}: Active set piece - Type: {set_piece_type}, "
+                f"Attacking: {active_set_piece.get('attacking_team')}, "
+                f"Wall players: {active_set_piece.get('wall_player_count', 0)}"
+            )
+        
+        # Log newly resolved set pieces
+        set_pieces = match.get_set_pieces()
+        if len(set_pieces) > 0:
+            # Log the most recent set piece
+            latest = set_pieces[-1]
+            if latest.get('resolved_frame') == frame_number:
+                logging.info(
+                    f"Set piece detected - Type: {latest.get('type', 'unknown')}, "
+                    f"Attacking: {latest.get('attacking_team')}, "
+                    f"Frames: {latest.get('start_frame')} to {latest.get('resolved_frame')}"
+                )
 
     frame = np.array(frame)
 
