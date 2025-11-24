@@ -1571,3 +1571,70 @@ class Match:
         Return the currently active (unresolved) set piece as dict, or None.
         """
         return self.set_piece_detector.get_active()
+    
+    def draw_active_set_piece(
+        self,
+        frame: PIL.Image.Image,
+    ) -> PIL.Image.Image:
+        """
+        Draw active defending set piece bounding box on the field.
+        Shows a bounding box around the wall of players.
+
+        Parameters
+        ----------
+        frame : PIL.Image.Image
+            Frame
+
+        Returns
+        -------
+        PIL.Image.Image
+            Frame with active set piece bounding box
+        """
+        active = self.get_active_set_piece()
+        if active is None:
+            return frame
+        
+        wall_bbox = active.get('wall_bbox')
+        if wall_bbox is None:
+            return frame
+        
+        # Draw bounding box around the wall
+        draw = ImageDraw.Draw(frame)
+        
+        # Extract coordinates
+        (xmin, ymin), (xmax, ymax) = wall_bbox
+        
+        # Convert to integers
+        xmin, ymin, xmax, ymax = int(xmin), int(ymin), int(xmax), int(ymax)
+        
+        # Color for defending set piece (yellow/orange)
+        bbox_color = (255, 200, 0)  # Orange-yellow
+        line_width = 4
+        
+        # Draw rounded rectangle for the bounding box
+        rectangle = [(xmin, ymin), (xmax, ymax)]
+        draw.rounded_rectangle(rectangle, radius=10, outline=bbox_color, width=line_width)
+        
+        # Draw label above the bounding box
+        label_font = self._load_font(size=18)
+        label_text = "DEFENDING SET PIECE"
+        bbox_text = draw.textbbox((0, 0), label_text, font=label_font)
+        label_width = bbox_text[2] - bbox_text[0]
+        label_height = bbox_text[3] - bbox_text[1]
+        label_x = (xmin + xmax) // 2 - label_width // 2
+        label_y = ymin - label_height - 10
+        
+        # Draw background for label
+        padding = 6
+        draw.rectangle(
+            [
+                label_x - padding,
+                label_y - padding,
+                label_x + label_width + padding,
+                label_y + label_height + padding,
+            ],
+            fill=(0, 0, 0, 220),
+        )
+        draw.text((label_x, label_y), label_text, font=label_font, fill=bbox_color)
+        
+        return frame

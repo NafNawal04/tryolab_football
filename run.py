@@ -127,7 +127,7 @@ parser.add_argument(
     help="Enable tackle detection and counter",
 )
 parser.add_argument(
-    "--set-pieces",
+    "--defending",
     action="store_true",
     help="Enable set piece detection (corners, free kicks)",
 )
@@ -364,7 +364,10 @@ for i, frame in enumerate(video):
             debug=False,
         )
 
-    if args.set_pieces:
+    if args.defending:
+        # Draw active defending set piece bounding box on field
+        frame = match.draw_active_set_piece(frame)
+        
         # Log set piece information
         active_set_piece = match.get_active_set_piece()
         if active_set_piece:

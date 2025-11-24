@@ -7,7 +7,9 @@ from soccer.team import Team
 
 class SetPieceDetector:
     """
-    Detects defending set pieces (corners, free kicks) and classifies them into:
+    Detects defending set pieces (corners, free kicks) by identifying when players
+    from both teams form a wall (clustered together) while the ball and one player
+    are far from the cluster. Classifies set pieces into:
     - Short: Quick set piece before wall forms
     - Direct: Direct shot at goal after wall forms
     - Tactical: Pass to teammate after wall forms
@@ -89,39 +91,59 @@ class SetPieceDetector:
         recent_movements = self._ball_movements[-recent_frames:]
         return any(m > self.ball_movement_threshold for m in recent_movements)
     
-    def _detect_wall(self, players: List[Player], attacking_team: Optional[Team]) -> Tuple[bool, List[Player]]:
+    def _detect_wall(self, players: List[Player], ball: Ball, closest_player: Optional[Player]) -> Tuple[bool, List[Player]]:
         """
-        Detect if defending players form a wall (standing side by side in a row).
+        Detect if players from BOTH teams form a wall (standing side by side in a group).
+        A defending set piece is detected when:
+        - Most players from both teams are clustered together (forming a wall)
+        - The ball and one player (the kicker) are far from this cluster
         
         Returns:
             (is_wall, wall_players): True if wall detected, list of players in wall
         """
-        if attacking_team is None or len(players) < self.wall_min_players:
-            return (False, [])
-        
-        # Get defending team players (opposite of attacking team)
-        defending_players = [p for p in players if p.team is not None and p.team != attacking_team]
-        
-        if len(defending_players) < self.wall_min_players:
+        if len(players) < self.wall_min_players:
             return (False, [])
         
         # Filter players with valid positions
-        valid_players = [p for p in defending_players if p.center is not None]
+        valid_players = [p for p in players if p.center is not None]
         if len(valid_players) < self.wall_min_players:
             return (False, [])
         
-        # Try to find a group of players forming a wall
-        # A wall is characterized by players standing side by side (similar Y coordinates)
-        # and relatively close together (within max_lateral_spacing)
+        # Check if ball is far from most players (indicating set piece situation)
+        if ball is None or ball.center is None:
+            return (False, [])
         
-        # Sort players by Y coordinate (vertical position)
-        sorted_players = sorted(valid_players, key=lambda p: p.center[1])
+        ball_pos = np.array(ball.center)
+        
+        # Calculate distances from ball to all players
+        player_distances = []
+        for player in valid_players:
+            player_pos = np.array(player.center)
+            dist = self._distance(tuple(ball_pos), tuple(player_pos))
+            player_distances.append((player, dist))
+        
+        # Sort by distance to ball
+        player_distances.sort(key=lambda x: x[1])
+        
+        # Check if most players are clustered together (close to each other)
+        # and far from the ball
+        # We need at least wall_min_players to be in a cluster
+        
+        # Try to find a cluster of players that are:
+        # 1. Close to each other (within max_lateral_spacing)
+        # 2. Far from the ball (indicating they're forming a wall)
+        
+        # Start with the closest players to each other (not closest to ball)
+        # Group players by proximity to each other
+        wall_candidates = []
+        
+        # Sort players by position to find clusters
+        sorted_by_y = sorted(valid_players, key=lambda p: p.center[1])
         
         # Try to find clusters of players with similar Y coordinates
-        wall_candidates = []
         current_cluster = []
         
-        for i, player in enumerate(sorted_players):
+        for i, player in enumerate(sorted_by_y):
             if not current_cluster:
                 current_cluster = [player]
             else:
@@ -136,15 +158,42 @@ class SetPieceDetector:
                     if len(current_cluster) >= self.wall_min_players:
                         # Check if players in cluster are close enough horizontally
                         if self._are_players_in_line(current_cluster):
-                            wall_candidates.append(current_cluster)
+                            # Check if this cluster is far from ball (set piece indicator)
+                            cluster_center = np.mean([np.array(p.center) for p in current_cluster], axis=0)
+                            dist_to_ball = self._distance(tuple(cluster_center), tuple(ball_pos))
+                            
+                            # Wall should be at least 100 pixels from ball
+                            if dist_to_ball > 100:
+                                wall_candidates.append(current_cluster)
                     current_cluster = [player]
         
         # Check last cluster
         if len(current_cluster) >= self.wall_min_players:
             if self._are_players_in_line(current_cluster):
-                wall_candidates.append(current_cluster)
+                cluster_center = np.mean([np.array(p.center) for p in current_cluster], axis=0)
+                dist_to_ball = self._distance(tuple(cluster_center), tuple(ball_pos))
+                if dist_to_ball > 100:
+                    wall_candidates.append(current_cluster)
         
-        # Return the largest wall candidate
+        # Also check if we have players from both teams in the wall
+        # Filter wall candidates to only include those with players from both teams
+        mixed_wall_candidates = []
+        for candidate in wall_candidates:
+            teams_in_wall = set()
+            for player in candidate:
+                if player.team is not None:
+                    teams_in_wall.add(player.team)
+            
+            # Wall should have players from both teams (defending set piece)
+            if len(teams_in_wall) >= 2:
+                mixed_wall_candidates.append(candidate)
+        
+        # Return the largest wall candidate with both teams
+        if mixed_wall_candidates:
+            largest_wall = max(mixed_wall_candidates, key=len)
+            return (True, largest_wall)
+        
+        # Fallback: if no mixed walls, still check for any large cluster
         if wall_candidates:
             largest_wall = max(wall_candidates, key=len)
             return (True, largest_wall)
@@ -178,6 +227,50 @@ class SetPieceDetector:
             return False
         
         return True
+    
+    def _calculate_wall_bbox(self, wall_players: List[Player]) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        """
+        Calculate bounding box around all players in the wall.
+        
+        Parameters:
+        -----------
+        wall_players : List[Player]
+            List of players forming the wall
+        
+        Returns:
+        --------
+        Optional[Tuple[Tuple[float, float], Tuple[float, float]]]
+            Bounding box as ((xmin, ymin), (xmax, ymax)) or None if no valid players
+        """
+        if not wall_players:
+            return None
+        
+        # Get all bounding boxes from player detections
+        x_coords = []
+        y_coords = []
+        
+        for player in wall_players:
+            if player.detection is None or player.detection.points is None:
+                continue
+            
+            # Get bounding box from detection
+            x1, y1 = player.detection.points[0]
+            x2, y2 = player.detection.points[1]
+            
+            x_coords.extend([x1, x2])
+            y_coords.extend([y1, y2])
+        
+        if not x_coords or not y_coords:
+            return None
+        
+        # Calculate bounding box with some padding
+        padding = 20  # Add padding around the wall
+        xmin = min(x_coords) - padding
+        ymin = min(y_coords) - padding
+        xmax = max(x_coords) + padding
+        ymax = max(y_coords) + padding
+        
+        return ((xmin, ymin), (xmax, ymax))
     
     def _trim_history(self):
         """Keep only recent history to avoid memory growth."""
@@ -267,8 +360,8 @@ class SetPieceDetector:
         self._ball_movements.append(ball_movement)
         self._trim_history()
         
-        # Detect wall formation
-        is_wall, wall_players = self._detect_wall(players, team_possession)
+        # Detect wall formation (players from both teams clustered together)
+        is_wall, wall_players = self._detect_wall(players, ball, closest_player)
         
         if is_wall:
             if self._wall_first_detected_frame is None:
@@ -284,6 +377,11 @@ class SetPieceDetector:
         if self._active_set_piece is not None:
             # Update active set piece
             self._active_set_piece['last_frame'] = frame_number
+            
+            # Update wall bounding box if wall still exists
+            if is_wall:
+                wall_bbox = self._calculate_wall_bbox(wall_players)
+                self._active_set_piece['wall_bbox'] = wall_bbox
             
             # Check if ball is kicked (significant movement after being stationary)
             if (self._is_ball_moving() and 
@@ -332,10 +430,10 @@ class SetPieceDetector:
         
         # Try to start a new set piece detection
         if self._active_set_piece is None:
-            # Conditions for set piece:
+            # Conditions for defending set piece:
             # 1. Ball is stationary
-            # 2. Ball is in possession of a player
-            # 3. Wall is forming or formed
+            # 2. Ball is in possession of a player (or close to a player)
+            # 3. Wall is forming or formed (players from both teams clustered)
             # 4. Ball has been stationary for required frames
             
             if (closest_player is not None and 
@@ -344,7 +442,10 @@ class SetPieceDetector:
                 is_wall and
                 self._wall_detected_frames >= self.wall_min_frames):
                 
-                # Start new set piece
+                # Calculate bounding box around the wall
+                wall_bbox = self._calculate_wall_bbox(wall_players)
+                
+                # Start new defending set piece
                 self._active_set_piece = {
                     'start_frame': frame_number,
                     'wall_detected_frame': self._wall_first_detected_frame,
@@ -354,6 +455,7 @@ class SetPieceDetector:
                     'resolved_frame': None,
                     'type': None,
                     'wall_player_count': len(wall_players),
+                    'wall_bbox': wall_bbox,  # Store bounding box for visualization
                 }
     
     def get_resolved(self) -> List[Dict]:
