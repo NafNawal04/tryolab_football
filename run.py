@@ -138,7 +138,7 @@ parser.add_argument(
     help="Conversion factor from pixels to meters (e.g., 0.01 for 100px=1m). If not provided, will be automatically calibrated.",
 )
 args = parser.parse_args()
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
 
 
 MATCH_KEYWORDS = {
@@ -368,14 +368,15 @@ for i, frame in enumerate(video):
         # Draw active defending set piece bounding box on field
         frame = match.draw_active_set_piece(frame)
         
-        # Log set piece information
+        # Log defending set piece information
         active_set_piece = match.get_active_set_piece()
         if active_set_piece:
-            set_piece_type = active_set_piece.get('type', 'detecting')
-            logging.debug(
-                f"Frame {frame_number}: Active set piece - Type: {set_piece_type}, "
-                f"Attacking: {active_set_piece.get('attacking_team')}, "
-                f"Wall players: {active_set_piece.get('wall_player_count', 0)}"
+            wall_count = active_set_piece.get('wall_player_count', 0)
+            wall_bbox = active_set_piece.get('wall_bbox')
+            logging.info(
+                f"Frame {frame_number}: ✓ DEFENDING SET PIECE ACTIVE - "
+                f"Wall players: {wall_count}, "
+                f"BBox: {wall_bbox}"
             )
         
         # Log newly resolved set pieces

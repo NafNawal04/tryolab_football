@@ -1602,10 +1602,30 @@ class Match:
         draw = ImageDraw.Draw(frame)
         
         # Extract coordinates
-        (xmin, ymin), (xmax, ymax) = wall_bbox
+        try:
+            (xmin, ymin), (xmax, ymax) = wall_bbox
+        except (ValueError, TypeError):
+            return frame
         
-        # Convert to integers
+        # Convert to integers and validate
         xmin, ymin, xmax, ymax = int(xmin), int(ymin), int(xmax), int(ymax)
+        
+        # Validate coordinates are reasonable
+        if xmin >= xmax or ymin >= ymax:
+            return frame
+        
+        # Get frame dimensions for bounds checking
+        frame_width, frame_height = frame.size
+        
+        # Clamp coordinates to frame bounds
+        xmin = max(0, min(xmin, frame_width))
+        ymin = max(0, min(ymin, frame_height))
+        xmax = max(0, min(xmax, frame_width))
+        ymax = max(0, min(ymax, frame_height))
+        
+        # Check if bbox is too small or invalid
+        if xmax - xmin < 10 or ymax - ymin < 10:
+            return frame
         
         # Color for defending set piece (yellow/orange)
         bbox_color = (255, 200, 0)  # Orange-yellow

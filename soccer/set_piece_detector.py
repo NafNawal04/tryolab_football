@@ -26,11 +26,11 @@ class SetPieceDetector:
         self.ball_stationary_threshold = 5.0  # Ball is stationary if movement < 5px
         self.ball_movement_threshold = 20.0  # Ball is moving if movement > 20px
         
-        # Wall detection parameters
-        self.wall_min_players = 3  # Minimum players to form a wall
-        self.wall_max_lateral_spacing = 80  # Max spacing between players in wall (pixels)
-        self.wall_max_depth_variance = 30  # Max depth variance for wall alignment (pixels)
-        self.wall_min_frames = int(0.5 * self.fps)  # Wall must exist for at least 0.5 seconds
+        # Wall detection parameters - simplified
+        self.wall_min_players = 5  # Minimum players in cluster
+        self.wall_max_lateral_spacing = 200  # Not used in simplified detection
+        self.wall_max_depth_variance = 80  # Not used in simplified detection
+        self.wall_min_frames = 1  # No frame stability requirement - detect immediately
         
         # Set piece detection thresholds
         self.set_piece_ball_stationary_frames = int(0.3 * self.fps)  # Ball stationary for 0.3s
@@ -48,6 +48,7 @@ class SetPieceDetector:
         # Wall detection state
         self._wall_detected_frames: int = 0
         self._wall_first_detected_frame: Optional[int] = None
+        self._wall_missing_frames: int = 0  # Track how many frames wall has been missing
         
     @staticmethod
     def _distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
@@ -93,112 +94,87 @@ class SetPieceDetector:
     
     def _detect_wall(self, players: List[Player], ball: Ball, closest_player: Optional[Player]) -> Tuple[bool, List[Player]]:
         """
-        Detect if players from BOTH teams form a wall (standing side by side in a group).
-        A defending set piece is detected when:
-        - Most players from both teams are clustered together (forming a wall)
-        - The ball and one player (the kicker) are far from this cluster
+        Simple wall detection: If most players are close together and only 1-2 are far away,
+        then it's a defending set piece wall.
         
         Returns:
             (is_wall, wall_players): True if wall detected, list of players in wall
         """
-        if len(players) < self.wall_min_players:
-            return (False, [])
+        import logging
+        logger = logging.getLogger(__name__)
         
         # Filter players with valid positions
         valid_players = [p for p in players if p.center is not None]
-        if len(valid_players) < self.wall_min_players:
+        if len(valid_players) < 6:  # Need at least 6 players total (5+ in cluster, 1-2 isolated)
             return (False, [])
         
-        # Check if ball is far from most players (indicating set piece situation)
-        if ball is None or ball.center is None:
-            return (False, [])
+        # Distance threshold for players to be considered "close" (standing together)
+        close_distance = 200  # pixels - players within this distance are considered together
         
-        ball_pos = np.array(ball.center)
+        # Distance threshold for players to be considered "far" from cluster
+        far_distance = 150  # pixels - players beyond this from cluster are considered isolated
         
-        # Calculate distances from ball to all players
-        player_distances = []
-        for player in valid_players:
-            player_pos = np.array(player.center)
-            dist = self._distance(tuple(ball_pos), tuple(player_pos))
-            player_distances.append((player, dist))
+        # Find the largest cluster of players that are close to each other
+        clusters = []
+        unassigned = valid_players.copy()
         
-        # Sort by distance to ball
-        player_distances.sort(key=lambda x: x[1])
-        
-        # Check if most players are clustered together (close to each other)
-        # and far from the ball
-        # We need at least wall_min_players to be in a cluster
-        
-        # Try to find a cluster of players that are:
-        # 1. Close to each other (within max_lateral_spacing)
-        # 2. Far from the ball (indicating they're forming a wall)
-        
-        # Start with the closest players to each other (not closest to ball)
-        # Group players by proximity to each other
-        wall_candidates = []
-        
-        # Sort players by position to find clusters
-        sorted_by_y = sorted(valid_players, key=lambda p: p.center[1])
-        
-        # Try to find clusters of players with similar Y coordinates
-        current_cluster = []
-        
-        for i, player in enumerate(sorted_by_y):
-            if not current_cluster:
-                current_cluster = [player]
-            else:
-                # Check if this player is close enough vertically to join cluster
-                last_player = current_cluster[-1]
-                y_diff = abs(player.center[1] - last_player.center[1])
-                
-                if y_diff <= self.wall_max_depth_variance:
-                    current_cluster.append(player)
-                else:
-                    # Check if current cluster is large enough to be a wall
-                    if len(current_cluster) >= self.wall_min_players:
-                        # Check if players in cluster are close enough horizontally
-                        if self._are_players_in_line(current_cluster):
-                            # Check if this cluster is far from ball (set piece indicator)
-                            cluster_center = np.mean([np.array(p.center) for p in current_cluster], axis=0)
-                            dist_to_ball = self._distance(tuple(cluster_center), tuple(ball_pos))
-                            
-                            # Wall should be at least 100 pixels from ball
-                            if dist_to_ball > 100:
-                                wall_candidates.append(current_cluster)
-                    current_cluster = [player]
-        
-        # Check last cluster
-        if len(current_cluster) >= self.wall_min_players:
-            if self._are_players_in_line(current_cluster):
-                cluster_center = np.mean([np.array(p.center) for p in current_cluster], axis=0)
-                dist_to_ball = self._distance(tuple(cluster_center), tuple(ball_pos))
-                if dist_to_ball > 100:
-                    wall_candidates.append(current_cluster)
-        
-        # Also check if we have players from both teams in the wall
-        # Filter wall candidates to only include those with players from both teams
-        mixed_wall_candidates = []
-        for candidate in wall_candidates:
-            teams_in_wall = set()
-            for player in candidate:
-                if player.team is not None:
-                    teams_in_wall.add(player.team)
+        while unassigned:
+            # Start a new cluster with the first unassigned player
+            seed = unassigned.pop(0)
+            cluster = [seed]
             
-            # Wall should have players from both teams (defending set piece)
-            if len(teams_in_wall) >= 2:
-                mixed_wall_candidates.append(candidate)
+            # Find all players close to this cluster
+            changed = True
+            while changed:
+                changed = False
+                for player in unassigned[:]:  # Copy list to iterate safely
+                    # Check if player is close to any player in the cluster
+                    min_dist_to_cluster = min(
+                        self._distance(tuple(np.array(p.center)), tuple(np.array(player.center)))
+                        for p in cluster
+                    )
+                    if min_dist_to_cluster <= close_distance:
+                        cluster.append(player)
+                        unassigned.remove(player)
+                        changed = True
+            
+            # Keep all clusters (we'll find the largest)
+            if len(cluster) > 0:
+                clusters.append(cluster)
         
-        # Return the largest wall candidate with both teams
-        if mixed_wall_candidates:
-            largest_wall = max(mixed_wall_candidates, key=len)
-            return (True, largest_wall)
+        if not clusters:
+            return (False, [])
         
-        # Fallback: if no mixed walls, still check for any large cluster
-        if wall_candidates:
-            largest_wall = max(wall_candidates, key=len)
-            return (True, largest_wall)
+        # Find the largest cluster (this is the "most players" group)
+        largest_cluster = max(clusters, key=len)
         
-        return (False, [])
+        # Check if this cluster has "most players" (at least 5, and more than half of all players)
+        total_players = len(valid_players)
+        cluster_size = len(largest_cluster)
+        
+        # Most players should be in the cluster (at least 5 players, and majority)
+        if cluster_size < 5 or cluster_size < total_players * 0.6:
+            return (False, [])
+        
+        # Check if there are 1-2 players far from this cluster
+        cluster_center = np.mean([np.array(p.center) for p in largest_cluster], axis=0)
+        
+        players_far_from_cluster = []
+        for player in valid_players:
+            if player not in largest_cluster:
+                player_pos = np.array(player.center)
+                dist_to_cluster = self._distance(tuple(cluster_center), tuple(player_pos))
+                if dist_to_cluster > far_distance:
+                    players_far_from_cluster.append(player)
+        
+        # Need exactly 1-2 players far from the cluster
+        if len(players_far_from_cluster) < 1 or len(players_far_from_cluster) > 2:
+            return (False, [])
+        
+        # All conditions met: most players clustered together, 1-2 players far away
+        logger.info(f"_detect_wall: ✓ DEFENDING SET PIECE WALL! "
+                   f"Wall: {cluster_size} players, Isolated: {len(players_far_from_cluster)} players")
+        return (True, largest_cluster)
     
     def _are_players_in_line(self, players: List[Player]) -> bool:
         """
@@ -245,26 +221,31 @@ class SetPieceDetector:
         if not wall_players:
             return None
         
-        # Get all bounding boxes from player detections
+        # Get all bounding boxes from player detections or centers
         x_coords = []
         y_coords = []
         
         for player in wall_players:
-            if player.detection is None or player.detection.points is None:
-                continue
-            
-            # Get bounding box from detection
-            x1, y1 = player.detection.points[0]
-            x2, y2 = player.detection.points[1]
-            
-            x_coords.extend([x1, x2])
-            y_coords.extend([y1, y2])
+            # Try to get bounding box from detection first
+            if player.detection is not None and player.detection.points is not None:
+                x1, y1 = player.detection.points[0]
+                x2, y2 = player.detection.points[1]
+                x_coords.extend([x1, x2])
+                y_coords.extend([y1, y2])
+            # Fallback to center if detection points not available
+            elif player.center is not None:
+                center_x, center_y = player.center
+                # Use a default player size around center (approximate player bbox size)
+                player_width = 40  # Approximate player width in pixels
+                player_height = 60  # Approximate player height in pixels
+                x_coords.extend([center_x - player_width/2, center_x + player_width/2])
+                y_coords.extend([center_y - player_height/2, center_y + player_height/2])
         
         if not x_coords or not y_coords:
             return None
         
         # Calculate bounding box with some padding
-        padding = 20  # Add padding around the wall
+        padding = 30  # Add padding around the wall (increased for better visibility)
         xmin = min(x_coords) - padding
         ymin = min(y_coords) - padding
         xmax = max(x_coords) + padding
@@ -363,17 +344,21 @@ class SetPieceDetector:
         # Detect wall formation (players from both teams clustered together)
         is_wall, wall_players = self._detect_wall(players, ball, closest_player)
         
+        # Track wall detection (simplified - just for logging)
         if is_wall:
             if self._wall_first_detected_frame is None:
                 self._wall_first_detected_frame = frame_number
             self._wall_detected_frames += 1
+            self._wall_missing_frames = 0
         else:
-            # Reset wall detection if wall breaks
-            if self._wall_detected_frames > 0:
-                self._wall_detected_frames = 0
-                self._wall_first_detected_frame = None
+            self._wall_missing_frames += 1
+            # Reset after a short time
+            if self._wall_missing_frames > int(0.5 * self.fps):
+                if self._wall_detected_frames > 0:
+                    self._wall_detected_frames = 0
+                    self._wall_first_detected_frame = None
         
-        # Check if we have an active set piece
+        # Check if we have an active defending set piece
         if self._active_set_piece is not None:
             # Update active set piece
             self._active_set_piece['last_frame'] = frame_number
@@ -383,79 +368,34 @@ class SetPieceDetector:
                 wall_bbox = self._calculate_wall_bbox(wall_players)
                 self._active_set_piece['wall_bbox'] = wall_bbox
             
-            # Check if ball is kicked (significant movement after being stationary)
-            if (self._is_ball_moving() and 
-                self._active_set_piece.get('ball_kicked_frame') is None):
-                self._active_set_piece['ball_kicked_frame'] = frame_number
-                # Store ball movement at kick time for classification
-                if len(self._ball_movements) > 0:
-                    # Get max movement from last few frames (when kick happened)
-                    recent_movements = self._ball_movements[-min(5, len(self._ball_movements)):]
-                    self._active_set_piece['ball_kick_movement'] = max(recent_movements) if recent_movements else 0.0
-                else:
-                    self._active_set_piece['ball_kick_movement'] = 0.0
-                
-                # Classify the set piece type
-                attacking_team_name = self._active_set_piece.get('attacking_team')
-                attacking_team = None
-                if attacking_team_name and players:
-                    # Find the team from players
-                    for player in players:
-                        if player.team and player.team.name == attacking_team_name:
-                            attacking_team = player.team
-                            break
-                
-                set_piece_type = self._classify_set_piece_type(
-                    self._active_set_piece, 
-                    frame_number,
-                    players,
-                    attacking_team
-                )
-                self._active_set_piece['type'] = set_piece_type
-            
-            # Resolve set piece if ball moves significantly or wall breaks
-            if (self._is_ball_moving() and 
-                self._active_set_piece.get('ball_kicked_frame') is not None):
-                # Ball was kicked, resolve after a short delay
-                frames_since_kick = frame_number - self._active_set_piece['ball_kicked_frame']
-                if frames_since_kick >= int(0.3 * self.fps):  # 0.3s after kick
-                    self._active_set_piece['resolved_frame'] = frame_number
-                    self._resolved_set_pieces.append(self._active_set_piece.copy())
-                    self._active_set_piece = None
-            
-            # Also resolve if wall breaks and ball hasn't been kicked
-            if not is_wall and self._active_set_piece.get('ball_kicked_frame') is None:
-                # Wall broke before kick - might not be a set piece
+            # Resolve set piece if wall breaks (players disperse)
+            if not is_wall:
+                # Wall broke - defending set piece is over
+                self._active_set_piece['resolved_frame'] = frame_number
+                self._resolved_set_pieces.append(self._active_set_piece.copy())
                 self._active_set_piece = None
         
-        # Try to start a new set piece detection
+        # Try to start a new defending set piece detection
         if self._active_set_piece is None:
-            # Conditions for defending set piece:
-            # 1. Ball is stationary
-            # 2. Ball is in possession of a player (or close to a player)
-            # 3. Wall is forming or formed (players from both teams clustered)
-            # 4. Ball has been stationary for required frames
+            # Simple condition: Wall detected (most players close, 1-2 far)
+            # No frame stability, no ball detection, no team checking needed
             
-            if (closest_player is not None and 
-                closest_player.team is not None and
-                self._is_ball_stationary() and
-                is_wall and
-                self._wall_detected_frames >= self.wall_min_frames):
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            if is_wall and len(wall_players) >= self.wall_min_players:
+                logger.info(f"🎯 DEFENDING SET PIECE DETECTED! Frame {frame_number}, Wall players: {len(wall_players)}")
                 
                 # Calculate bounding box around the wall
                 wall_bbox = self._calculate_wall_bbox(wall_players)
+                logger.info(f"Wall bbox: {wall_bbox}")
                 
                 # Start new defending set piece
                 self._active_set_piece = {
                     'start_frame': frame_number,
-                    'wall_detected_frame': self._wall_first_detected_frame,
-                    'attacking_team': closest_player.team.name,
-                    'defending_team': (team_possession.name if team_possession and team_possession != closest_player.team else None),
-                    'ball_kicked_frame': None,
-                    'resolved_frame': None,
-                    'type': None,
+                    'wall_detected_frame': frame_number,
                     'wall_player_count': len(wall_players),
-                    'wall_bbox': wall_bbox,  # Store bounding box for visualization
+                    'wall_bbox': wall_bbox,
                 }
     
     def get_resolved(self) -> List[Dict]:
