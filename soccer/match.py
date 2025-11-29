@@ -1572,6 +1572,135 @@ class Match:
         """
         return self.set_piece_detector.get_active()
     
+    def get_match_time_minutes(self) -> float:
+        """
+        Get current match time in minutes.
+        
+        Returns:
+        --------
+        float
+            Match time in minutes
+        """
+        if self.fps == 0:
+            return 0.0
+        return (self.duration / self.fps) / 60.0
+    
+    def get_tackles_won_per_minute(self, team: Team) -> float:
+        """
+        Calculate tackles won per minute for a team.
+        
+        Parameters:
+        -----------
+        team : Team
+            Team to calculate for
+        
+        Returns:
+        --------
+        float
+            Tackles won per minute (0.0 if no time has passed)
+        """
+        match_time_minutes = self.get_match_time_minutes()
+        if match_time_minutes == 0:
+            return 0.0
+        
+        # Count successful tackles by this team
+        tackles_won = sum(
+            1 for t in self.tackles 
+            if t.get('defender_team') == team.name and t.get('outcome') == 'success'
+        )
+        
+        return tackles_won / match_time_minutes
+    
+    def get_passes_per_minute(self, team: Team) -> float:
+        """
+        Calculate passes per minute for a team.
+        
+        Parameters:
+        -----------
+        team : Team
+            Team to calculate for
+        
+        Returns:
+        --------
+        float
+            Passes per minute (0.0 if no time has passed)
+        """
+        match_time_minutes = self.get_match_time_minutes()
+        if match_time_minutes == 0:
+            return 0.0
+        
+        total_passes = len(team.passes)
+        return total_passes / match_time_minutes
+    
+    def draw_per_minute_stats(
+        self,
+        frame: PIL.Image.Image,
+    ) -> PIL.Image.Image:
+        """
+        Draw tackles won per minute and passes per minute statistics on the video.
+        
+        Parameters:
+        -----------
+        frame : PIL.Image.Image
+            Frame to draw on
+        
+        Returns:
+        --------
+        PIL.Image.Image
+            Frame with per-minute stats annotations
+        """
+        draw = ImageDraw.Draw(frame)
+        
+        # Get frame dimensions
+        frame_width, frame_height = frame.size
+        
+        # Position stats in top-left corner
+        start_x = 40
+        start_y = 40
+        line_height = 35
+        font_size = 20
+        
+        font = self._load_font(size=font_size)
+        
+        # Calculate stats
+        home_tackles_per_min = self.get_tackles_won_per_minute(self.home)
+        away_tackles_per_min = self.get_tackles_won_per_minute(self.away)
+        home_passes_per_min = self.get_passes_per_minute(self.home)
+        away_passes_per_min = self.get_passes_per_minute(self.away)
+        
+        # Prepare text lines
+        lines = [
+            f"{self.home.abbreviation} - Tackles Won/Min: {home_tackles_per_min:.2f}",
+            f"{self.home.abbreviation} - Passes/Min: {home_passes_per_min:.2f}",
+            f"{self.away.abbreviation} - Tackles Won/Min: {away_tackles_per_min:.2f}",
+            f"{self.away.abbreviation} - Passes/Min: {away_passes_per_min:.2f}",
+        ]
+        
+        # Draw background rectangle
+        padding = 10
+        max_width = max(draw.textbbox((0, 0), line, font=font)[2] - draw.textbbox((0, 0), line, font=font)[0] for line in lines)
+        bg_height = len(lines) * line_height + padding * 2
+        bg_width = max_width + padding * 2
+        
+        # Semi-transparent black background
+        bg_rectangle = [
+            start_x - padding,
+            start_y - padding,
+            start_x + bg_width,
+            start_y + bg_height
+        ]
+        draw.rectangle(bg_rectangle, fill=(0, 0, 0, 200))
+        
+        # Draw text lines - always use white for visibility on black background
+        y_offset = start_y
+        text_color = (255, 255, 255)  # White text for all lines
+        
+        for i, line in enumerate(lines):
+            draw.text((start_x, y_offset), line, font=font, fill=text_color)
+            y_offset += line_height
+        
+        return frame
+    
     def draw_active_set_piece(
         self,
         frame: PIL.Image.Image,

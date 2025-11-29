@@ -21,7 +21,9 @@ from run_utils import (
 from soccer import Match, Player, Team
 from soccer.draw import AbsolutePath
 from soccer.pass_event import Pass
+from soccer.movement_analysis import MovementAnalyzer
 from auto_calibrate import auto_calibrate
+from tactical_view import TacticalViewProjector
 
 
 def build_match_setup(
@@ -130,6 +132,21 @@ parser.add_argument(
     "--defending",
     action="store_true",
     help="Enable set piece detection (corners, free kicks)",
+)
+parser.add_argument(
+    "--stats",
+    action="store_true",
+    help="Enable per-minute statistics (tackles won/min, passes/min) annotations",
+)
+parser.add_argument(
+    "--tactical-view",
+    action="store_true",
+    help="Render a tactical top-down view built from automatic homography estimation",
+)
+parser.add_argument(
+    "--movement-analysis",
+    action="store_true",
+    help="Analyze player paths, off-ball runs, and zone transitions (requires --tactical-view)",
 )
 parser.add_argument(
     "--pixels-to-meters",
@@ -264,6 +281,13 @@ coord_transformations = None
 # Paths
 path = AbsolutePath()
 
+tactical_projector = TacticalViewProjector() if (args.tactical_view or args.movement_analysis) else None
+movement_analyzer = MovementAnalyzer() if args.movement_analysis else None
+
+if args.movement_analysis and not args.tactical_view:
+    logging.warning("--movement-analysis requires --tactical-view. Enabling tactical view automatically.")
+    args.tactical_view = True
+
 # Get Counter img
 possession_background = match.get_possession_background()
 passes_background = match.get_passes_background()
@@ -309,6 +333,36 @@ for i, frame in enumerate(video):
     ball = get_main_ball(ball_detections)
     players = Player.from_detections(detections=players_detections, teams=teams)
     match.update(players, ball, frame=frame)
+
+    # Update movement analysis if enabled
+    tactical_positions = {}
+    if movement_analyzer and tactical_projector:
+        # Ensure tactical projector is initialized
+        if tactical_projector.try_initialize(frame) and tactical_projector.ready:
+            # Get tactical positions for all players
+            projections = tactical_projector.project_players(players)
+            for proj in projections:
+                if proj.player_id is not None and proj.position is not None:
+                    try:
+                        tactical_positions[proj.player_id] = (
+                            float(proj.position[0]),
+                            float(proj.position[1]),
+                        )
+                    except (IndexError, TypeError):
+                        # Skip if position is invalid
+                        continue
+            
+            # Update movement analyzer
+            if tactical_positions:
+                movement_analyzer.update(
+                    players=players,
+                    tactical_positions=tactical_positions,
+                    closest_player=match.closest_player,
+                )
+
+    tactical_overlay = None
+    if tactical_projector:
+        tactical_overlay = tactical_projector.render_view(frame=frame, players=players)
 
     # Draw
     frame = PIL.Image.fromarray(frame)
@@ -391,7 +445,24 @@ for i, frame in enumerate(video):
                     f"Frames: {latest.get('start_frame')} to {latest.get('resolved_frame')}"
                 )
 
+    if args.stats:
+        # Draw per-minute statistics (tackles won/min, passes/min)
+        frame = match.draw_per_minute_stats(frame)
+
+    if tactical_overlay is not None:
+        overlay_rgb = cv2.cvtColor(tactical_overlay, cv2.COLOR_BGR2RGB)
+        overlay_img = PIL.Image.fromarray(overlay_rgb)
+        overlay_position = (
+            frame.width - overlay_img.width - 20,
+            20,
+        )
+        frame.paste(overlay_img, overlay_position)
+
     frame = np.array(frame)
 
     # Write video
     video.write(frame)
+
+# Print movement analysis summary if enabled
+if movement_analyzer:
+    movement_analyzer.print_summary(fps=fps)
