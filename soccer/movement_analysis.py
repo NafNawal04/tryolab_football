@@ -438,16 +438,21 @@ class MovementAnalyzer:
         print("MOVEMENT ANALYSIS SUMMARY")
         print("=" * 80)
         
-        # Group by team
-        team_stats: Dict[Optional[Team], List[PlayerMovementStats]] = {}
+        # Group by team (use team name as key since Team objects aren't hashable)
+        team_stats: Dict[str, List[PlayerMovementStats]] = {}
+        team_objects: Dict[str, Optional[Team]] = {}
+        
         for stat in all_stats.values():
             team = stat.team
-            if team not in team_stats:
-                team_stats[team] = []
-            team_stats[team].append(stat)
-        
-        for team, stats_list in team_stats.items():
             team_name = team.name if team else "Unknown"
+            
+            if team_name not in team_stats:
+                team_stats[team_name] = []
+                team_objects[team_name] = team
+            
+            team_stats[team_name].append(stat)
+        
+        for team_name, stats_list in team_stats.items():
             print(f"\n{team_name.upper()} ({len(stats_list)} players)")
             print("-" * 80)
             
