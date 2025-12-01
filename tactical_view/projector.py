@@ -19,6 +19,15 @@ class TacticalProjection:
     position: np.ndarray
 
 
+@dataclass
+class PitchDetectionResult:
+    """Stores the detected pitch geometry for debugging/annotation."""
+
+    corners: Optional[np.ndarray]
+    field_lines: Optional[np.ndarray]
+    field_mask: Optional[np.ndarray]
+
+
 def _order_points(points: np.ndarray) -> np.ndarray:
     """
     Return the 4 points ordered as top-left, top-right, bottom-left, bottom-right.
@@ -80,10 +89,38 @@ def _order_points(points: np.ndarray) -> np.ndarray:
     return rect
 
 
-def _detect_field_lines(frame: np.ndarray) -> Optional[np.ndarray]:
+def _detect_line_segments(frame: np.ndarray) -> Optional[np.ndarray]:
+    """Detect prominent line segments (white field lines) using HSV mask + Canny + Hough."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # White lines: low saturation, high value
+    lower_white = np.array([0, 0, 180])
+    upper_white = np.array([180, 60, 255])
+    white_mask = cv2.inRange(hsv, lower_white, upper_white)
+
+    # Suppress noise and thin mask to line-like edges
+    white_mask = cv2.GaussianBlur(white_mask, (5, 5), 0)
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+
+    edges = cv2.Canny(white_mask, 30, 120, apertureSize=3)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+
+    min_len = max(40, min(frame.shape[0], frame.shape[1]) // 8)
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=80,
+        minLineLength=min_len,
+        maxLineGap=30,
+    )
+
+    return lines
+
+
+def _detect_field_mask(frame: np.ndarray) -> Optional[np.ndarray]:
     """
-    Detect field lines (white lines on green background) to identify the playing field.
-    Returns a mask of the field region.
+    Detect field regions by combining green areas with high-value (white) values.
+    Returns a binary mask roughly covering the playing surface.
     """
     h, w = frame.shape[:2]
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -130,84 +167,79 @@ def _detect_field_lines(frame: np.ndarray) -> Optional[np.ndarray]:
     kernel = np.ones((9, 9), np.uint8)
     field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    
+
     return field_mask
 
 
-def _find_field_region_from_lines(frame: np.ndarray) -> Optional[np.ndarray]:
+def _line_orientation(x1: int, y1: int, x2: int, y2: int) -> float:
+    """Return absolute angle of line in degrees."""
+    angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+    angle = abs(angle)
+    if angle > 180:
+        angle -= 180
+    return angle
+
+
+def _find_field_region_from_lines(frame: np.ndarray, lines: Optional[np.ndarray]) -> Optional[np.ndarray]:
     """
     Find the field region by detecting field lines and using their intersections.
     This is more reliable than just green color detection.
     """
     h, w = frame.shape[:2]
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Detect edges
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    
-    # Use HoughLinesP to detect field lines
-    lines = cv2.HoughLinesP(
-        edges, 
-        rho=1, 
-        theta=np.pi/180, 
-        threshold=100, 
-        minLineLength=min(w, h) // 10, 
-        maxLineGap=20
-    )
     
     if lines is None or len(lines) < 4:
         return None
     
-    # Find line intersections to identify field corners
-    intersections = []
-    for i in range(len(lines)):
-        x1, y1, x2, y2 = lines[i][0]
-        for j in range(i + 1, len(lines)):
-            x3, y3, x4, y4 = lines[j][0]
-            
-            # Calculate intersection
-            denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-            if abs(denom) < 1e-6:
-                continue
-            
-            t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-            u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
-            
-            # Check if intersection is within line segments or close to them
-            if -0.5 <= t <= 1.5 and -0.5 <= u <= 1.5:
-                px = x1 + t * (x2 - x1)
-                py = y1 + t * (y2 - y1)
-                
-                # Only keep intersections within frame bounds
-                if 0 <= px < w and 0 <= py < h:
-                    intersections.append([px, py])
+    horizontals = []
+    verticals = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        length = np.hypot(x2 - x1, y2 - y1)
+        if length < min(w, h) * 0.2:
+            continue
+        angle = _line_orientation(x1, y1, x2, y2)
+        if angle < 20 or angle > 160:
+            horizontals.append((line[0], length))
+        elif 70 < angle < 110:
+            verticals.append((line[0], length))
     
-    if len(intersections) < 4:
+    if len(horizontals) < 2 or len(verticals) < 2:
         return None
     
-    # Find the convex hull of intersections to get field boundary
-    intersections = np.array(intersections, dtype=np.float32)
-    hull = cv2.convexHull(intersections)
+    # Choose top/bottom horizontal lines by average y
+    horizontals.sort(key=lambda item: (item[0][1] + item[0][3]) / 2)
+    top_line = horizontals[0][0]
+    bottom_line = horizontals[-1][0]
     
-    if len(hull) < 4:
+    # Choose left/right vertical lines by average x
+    verticals.sort(key=lambda item: (item[0][0] + item[0][2]) / 2)
+    left_line = verticals[0][0]
+    right_line = verticals[-1][0]
+    
+    def intersect(l1, l2):
+        x1, y1, x2, y2 = l1
+        x3, y3, x4, y4 = l2
+        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(denom) < 1e-6:
+            return None
+        px = ((x1*y2 - y1*x2)*(x3 - x4) - (x1 - x2)*(x3*y4 - y3*x4)) / denom
+        py = ((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / denom
+        return [px, py]
+    
+    tl = intersect(top_line, left_line)
+    tr = intersect(top_line, right_line)
+    bl = intersect(bottom_line, left_line)
+    br = intersect(bottom_line, right_line)
+    
+    corners = [tl, tr, bl, br]
+    if any(pt is None for pt in corners):
         return None
     
-    # Approximate to 4 corners
-    epsilon = 0.02 * cv2.arcLength(hull, True)
-    approx = cv2.approxPolyDP(hull, epsilon, True)
-    
-    if len(approx) == 4:
-        return approx.reshape(-1, 2).astype(np.float32)
-    elif len(approx) > 4:
-        # Get minimum area rectangle
-        rect = cv2.minAreaRect(approx)
-        box_points = cv2.boxPoints(rect)
-        return box_points.astype(np.float32)
-    
-    return None
+    corners = np.array(corners, dtype=np.float32)
+    return corners
 
 
-def _detect_pitch_corners(frame: np.ndarray) -> Optional[np.ndarray]:
+def _detect_pitch_corners(frame: np.ndarray) -> PitchDetectionResult:
     """
     Detect four pitch corner points using multiple strategies:
     1. Field line detection (most reliable)
@@ -220,18 +252,19 @@ def _detect_pitch_corners(frame: np.ndarray) -> Optional[np.ndarray]:
         return None
 
     h, w = frame.shape[:2]
+    lines = _detect_line_segments(frame)
+    field_mask = _detect_field_mask(frame)
     
     # Strategy 1: Use field line intersections (most reliable)
-    corners = _find_field_region_from_lines(frame)
+    corners = _find_field_region_from_lines(frame, lines)
     if corners is not None and _validate_corners(corners, w, h):
         ordered = _order_points(corners)
         score = _score_corners(ordered, w, h)
         if score > 0.3:  # Lower threshold for line-based detection
-            return ordered
+            return PitchDetectionResult(corners=ordered, field_lines=lines, field_mask=field_mask)
     
     # Strategy 2: Green mask with field line validation
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    field_mask = _detect_field_lines(frame)
     
     if field_mask is not None:
         # Find contours in the field mask
@@ -270,7 +303,7 @@ def _detect_pitch_corners(frame: np.ndarray) -> Optional[np.ndarray]:
                                 ordered = _order_points(corners)
                                 score = _score_corners(ordered, w, h)
                                 if score > 0.4:
-                                    return ordered
+                                    return PitchDetectionResult(corners=ordered, field_lines=lines, field_mask=field_mask)
                         elif len(approx) > 4:
                             rect = cv2.minAreaRect(approx)
                             box_points = cv2.boxPoints(rect)
@@ -279,7 +312,7 @@ def _detect_pitch_corners(frame: np.ndarray) -> Optional[np.ndarray]:
                                 ordered = _order_points(corners)
                                 score = _score_corners(ordered, w, h)
                                 if score > 0.4:
-                                    return ordered
+                                    return PitchDetectionResult(corners=ordered, field_lines=lines, field_mask=field_mask)
     
     # Strategy 3: Fallback to original green mask approach (but with better filtering)
     green_ranges = [
@@ -354,7 +387,7 @@ def _detect_pitch_corners(frame: np.ndarray) -> Optional[np.ndarray]:
         if best_corners is not None and best_score > 0.5:
             break
     
-    return best_corners
+    return PitchDetectionResult(corners=best_corners, field_lines=lines, field_mask=field_mask)
 
 
 def _refine_corners_with_edges(frame: np.ndarray, initial_corners: np.ndarray) -> Optional[np.ndarray]:
@@ -445,7 +478,9 @@ def _validate_corners(corners: np.ndarray, img_width: int, img_height: int) -> b
     width = np.max(x_coords) - np.min(x_coords)
     height = np.max(y_coords) - np.min(y_coords)
     
-    if width < img_width * 0.2 or height < img_height * 0.2:
+    min_width_ratio = 0.6
+    min_height_ratio = 0.5
+    if width < img_width * min_width_ratio or height < img_height * min_height_ratio:
         return False
     
     # Aspect ratio should be reasonable (not too extreme)
@@ -501,6 +536,8 @@ class TacticalViewProjector:
         self._corner_buffer: List[np.ndarray] = []
         self._initialization_attempts = 0
         self._max_initialization_attempts = 30  # Try for 30 frames before giving up
+        self._last_field_lines: Optional[np.ndarray] = None
+        self._last_field_mask: Optional[np.ndarray] = None
 
     @property
     def ready(self) -> bool:
@@ -517,8 +554,13 @@ class TacticalViewProjector:
         if frame is None or frame.size == 0:
             return False
 
-        # Try to detect corners
-        corners = _detect_pitch_corners(frame)
+        # Try to detect corners and capture debug info
+        detection = _detect_pitch_corners(frame)
+        corners = detection.corners
+        if detection.field_lines is not None:
+            self._last_field_lines = detection.field_lines
+        if detection.field_mask is not None:
+            self._last_field_mask = detection.field_mask
         
         if corners is not None:
             # Store frame and corners for averaging
@@ -758,4 +800,52 @@ class TacticalViewProjector:
         except Exception:
             # Return None if rendering fails
             return None
+
+    def annotate_field_lines(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Draw detected white field lines on top of the original frame using yellow lines.
+        Helpful for debugging homography issues when --whiteline is enabled.
+        """
+        if frame is None or frame.size == 0:
+            return frame
+
+        lines = self._last_field_lines
+        if lines is None or len(lines) == 0:
+            lines = _detect_line_segments(frame)
+
+        annotated = frame.copy()
+        drew_any = False
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                drew_any = True
+
+        # If we still didn't draw anything, fall back to showing field mask edges
+        if not drew_any:
+            mask = self._last_field_mask
+            if mask is None or mask.size == 0:
+                mask = _detect_field_mask(frame)
+            if mask is not None:
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for contour in contours:
+                    area = cv2.contourArea(contour)
+                    if area < (frame.shape[0] * frame.shape[1]) * 0.05:
+                        continue
+                    cv2.drawContours(annotated, [contour], -1, (0, 255, 255), 2)
+                    drew_any = True
+
+        if not drew_any:
+            cv2.putText(
+                annotated,
+                "white lines not detected",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        return annotated
 
