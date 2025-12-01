@@ -20,43 +20,272 @@ class TacticalProjection:
 
 
 def _order_points(points: np.ndarray) -> np.ndarray:
-    """Return the 4 points ordered as top-left, top-right, bottom-left, bottom-right."""
+    """
+    Return the 4 points ordered as top-left, top-right, bottom-left, bottom-right.
+    Uses a more reliable method based on centroid and angle.
+    """
     pts = points.astype(np.float32)
-    rect = np.zeros((4, 2), dtype=np.float32)
-
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[3] = pts[np.argmax(s)]
-
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[2] = pts[np.argmax(diff)]
-
+    if len(pts) != 4:
+        return pts
+    
+    # Calculate centroid
+    centroid = np.mean(pts, axis=0)
+    
+    # Sort points by angle from centroid
+    # This helps identify which corner is which
+    angles = []
+    for pt in pts:
+        dx = pt[0] - centroid[0]
+        dy = pt[1] - centroid[1]
+        angle = np.arctan2(dy, dx)
+        angles.append(angle)
+    
+    # Sort by angle and identify corners
+    sorted_indices = np.argsort(angles)
+    sorted_pts = pts[sorted_indices]
+    
+    # Now identify which is TL, TR, BL, BR based on position
+    # Top points have smaller y, bottom points have larger y
+    # Left points have smaller x, right points have larger x
+    y_sorted = np.argsort(pts[:, 1])  # Sort by y coordinate
+    x_sorted = np.argsort(pts[:, 0])  # Sort by x coordinate
+    
+    # Top-left: smallest x and smallest y
+    # Top-right: largest x and smallest y
+    # Bottom-left: smallest x and largest y
+    # Bottom-right: largest x and largest y
+    
+    top_indices = y_sorted[:2]  # Two points with smallest y
+    bottom_indices = y_sorted[2:]  # Two points with largest y
+    
+    # Find left and right among top points
+    top_pts = pts[top_indices]
+    top_x_sorted = np.argsort(top_pts[:, 0])
+    tl_idx = top_indices[top_x_sorted[0]]
+    tr_idx = top_indices[top_x_sorted[1]]
+    
+    # Find left and right among bottom points
+    bottom_pts = pts[bottom_indices]
+    bottom_x_sorted = np.argsort(bottom_pts[:, 0])
+    bl_idx = bottom_indices[bottom_x_sorted[0]]
+    br_idx = bottom_indices[bottom_x_sorted[1]]
+    
+    rect = np.array([
+        pts[tl_idx],  # Top-left
+        pts[tr_idx],  # Top-right
+        pts[bl_idx],  # Bottom-left
+        pts[br_idx],  # Bottom-right
+    ], dtype=np.float32)
+    
     return rect
+
+
+def _detect_field_lines(frame: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Detect field lines (white lines on green background) to identify the playing field.
+    Returns a mask of the field region.
+    """
+    h, w = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    # Detect white lines (field markings)
+    # White in HSV: low saturation, high value
+    lower_white = np.array([0, 0, 200])
+    upper_white = np.array([180, 30, 255])
+    white_mask = cv2.inRange(hsv, lower_white, upper_white)
+    
+    # Detect green field
+    green_ranges = [
+        (np.array([30, 30, 30]), np.array([90, 255, 255])),
+        (np.array([35, 40, 40]), np.array([85, 255, 255])),
+        (np.array([40, 50, 50]), np.array([80, 255, 255])),
+    ]
+    
+    green_mask = None
+    for lower_green, upper_green in green_ranges:
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+        if green_mask is None:
+            green_mask = mask.copy()
+        else:
+            green_mask = cv2.bitwise_or(green_mask, mask)
+    
+    if green_mask is None:
+        return None
+    
+    # Combine: field should have green AND potentially white lines
+    # But prioritize regions with white lines (actual field markings)
+    field_mask = green_mask.copy()
+    
+    # Dilate white lines to connect them
+    kernel = np.ones((5, 5), np.uint8)
+    white_dilated = cv2.dilate(white_mask, kernel, iterations=2)
+    
+    # Field region should be green with white lines nearby
+    # Use morphological operations to find regions with both
+    field_mask = cv2.bitwise_and(field_mask, cv2.bitwise_not(white_dilated))
+    field_mask = cv2.addWeighted(field_mask, 0.7, white_dilated, 0.3, 0)
+    field_mask = (field_mask > 100).astype(np.uint8) * 255
+    
+    # Clean up the mask
+    kernel = np.ones((9, 9), np.uint8)
+    field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    
+    return field_mask
+
+
+def _find_field_region_from_lines(frame: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Find the field region by detecting field lines and using their intersections.
+    This is more reliable than just green color detection.
+    """
+    h, w = frame.shape[:2]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Detect edges
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    
+    # Use HoughLinesP to detect field lines
+    lines = cv2.HoughLinesP(
+        edges, 
+        rho=1, 
+        theta=np.pi/180, 
+        threshold=100, 
+        minLineLength=min(w, h) // 10, 
+        maxLineGap=20
+    )
+    
+    if lines is None or len(lines) < 4:
+        return None
+    
+    # Find line intersections to identify field corners
+    intersections = []
+    for i in range(len(lines)):
+        x1, y1, x2, y2 = lines[i][0]
+        for j in range(i + 1, len(lines)):
+            x3, y3, x4, y4 = lines[j][0]
+            
+            # Calculate intersection
+            denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+            if abs(denom) < 1e-6:
+                continue
+            
+            t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+            u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+            
+            # Check if intersection is within line segments or close to them
+            if -0.5 <= t <= 1.5 and -0.5 <= u <= 1.5:
+                px = x1 + t * (x2 - x1)
+                py = y1 + t * (y2 - y1)
+                
+                # Only keep intersections within frame bounds
+                if 0 <= px < w and 0 <= py < h:
+                    intersections.append([px, py])
+    
+    if len(intersections) < 4:
+        return None
+    
+    # Find the convex hull of intersections to get field boundary
+    intersections = np.array(intersections, dtype=np.float32)
+    hull = cv2.convexHull(intersections)
+    
+    if len(hull) < 4:
+        return None
+    
+    # Approximate to 4 corners
+    epsilon = 0.02 * cv2.arcLength(hull, True)
+    approx = cv2.approxPolyDP(hull, epsilon, True)
+    
+    if len(approx) == 4:
+        return approx.reshape(-1, 2).astype(np.float32)
+    elif len(approx) > 4:
+        # Get minimum area rectangle
+        rect = cv2.minAreaRect(approx)
+        box_points = cv2.boxPoints(rect)
+        return box_points.astype(np.float32)
+    
+    return None
 
 
 def _detect_pitch_corners(frame: np.ndarray) -> Optional[np.ndarray]:
     """
-    Detect four pitch corner points using improved green mask + contour search.
-    Uses multiple HSV ranges and validation to improve robustness.
+    Detect four pitch corner points using multiple strategies:
+    1. Field line detection (most reliable)
+    2. Green mask with field line validation
+    3. Edge-based detection
+    
     Returns points ordered TL, TR, BL, BR in image coordinates.
     """
     if frame is None or frame.size == 0:
         return None
 
     h, w = frame.shape[:2]
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     
-    # Try multiple HSV ranges for different lighting conditions
+    # Strategy 1: Use field line intersections (most reliable)
+    corners = _find_field_region_from_lines(frame)
+    if corners is not None and _validate_corners(corners, w, h):
+        ordered = _order_points(corners)
+        score = _score_corners(ordered, w, h)
+        if score > 0.3:  # Lower threshold for line-based detection
+            return ordered
+    
+    # Strategy 2: Green mask with field line validation
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    field_mask = _detect_field_lines(frame)
+    
+    if field_mask is not None:
+        # Find contours in the field mask
+        contours, _ = cv2.findContours(field_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            # Filter by area and position (field should be in center/lower portion)
+            min_area = (w * h) * 0.1  # At least 10% of frame
+            valid_contours = []
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < min_area:
+                    continue
+                # Check if contour is in reasonable position (not just top corners)
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cy = int(M["m01"] / M["m00"])
+                    # Field should be in lower 80% of frame
+                    if cy > h * 0.2:
+                        valid_contours.append((contour, area))
+            
+            if valid_contours:
+                # Sort by area and position (prefer larger, lower contours)
+                valid_contours.sort(key=lambda x: (x[1], -cv2.moments(x[0])["m01"] / cv2.moments(x[0])["m00"] if cv2.moments(x[0])["m00"] != 0 else 0), reverse=True)
+                
+                for contour, _ in valid_contours[:3]:  # Try top 3 candidates
+                    hull = cv2.convexHull(contour)
+                    
+                    # Try to get 4 corners
+                    for epsilon_factor in [0.01, 0.02, 0.03, 0.05]:
+                        epsilon = epsilon_factor * cv2.arcLength(hull, True)
+                        approx = cv2.approxPolyDP(hull, epsilon, True)
+                        
+                        if len(approx) == 4:
+                            corners = approx.reshape(-1, 2).astype(np.float32)
+                            if _validate_corners(corners, w, h):
+                                ordered = _order_points(corners)
+                                score = _score_corners(ordered, w, h)
+                                if score > 0.4:
+                                    return ordered
+                        elif len(approx) > 4:
+                            rect = cv2.minAreaRect(approx)
+                            box_points = cv2.boxPoints(rect)
+                            corners = box_points.astype(np.float32)
+                            if _validate_corners(corners, w, h):
+                                ordered = _order_points(corners)
+                                score = _score_corners(ordered, w, h)
+                                if score > 0.4:
+                                    return ordered
+    
+    # Strategy 3: Fallback to original green mask approach (but with better filtering)
     green_ranges = [
-        # Standard green range
         (np.array([30, 30, 30]), np.array([90, 255, 255])),
-        # Brighter/darker conditions
         (np.array([35, 40, 40]), np.array([85, 255, 255])),
-        # More saturated greens
         (np.array([40, 50, 50]), np.array([80, 255, 255])),
-        # Wider range for artificial lighting
-        (np.array([25, 20, 20]), np.array([95, 255, 255])),
     ]
     
     best_corners = None
@@ -65,67 +294,130 @@ def _detect_pitch_corners(frame: np.ndarray) -> Optional[np.ndarray]:
     for lower_green, upper_green in green_ranges:
         mask = cv2.inRange(hsv, lower_green, upper_green)
         
-        # Improved morphological operations
         kernel_size = max(5, min(w, h) // 100)
         kernel = np.ones((kernel_size, kernel_size), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
         
-        # Remove small noise
-        min_area = (w * h) * 0.01  # At least 1% of frame
+        min_area = (w * h) * 0.1  # Higher threshold
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             continue
         
-        # Filter contours by area
-        large_contours = [c for c in contours if cv2.contourArea(c) > min_area]
+        # Filter by area and position
+        large_contours = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < min_area:
+                continue
+            M = cv2.moments(c)
+            if M["m00"] != 0:
+                cy = int(M["m01"] / M["m00"])
+                # Prefer contours in lower portion of frame
+                if cy > h * 0.15:
+                    large_contours.append((c, area, cy))
+        
         if not large_contours:
             continue
         
-        # Try the largest contour first
-        largest = max(large_contours, key=cv2.contourArea)
+        # Sort by position (lower is better) and area
+        large_contours.sort(key=lambda x: (x[2], x[1]), reverse=True)
         
-        # Validate that it's a reasonable size (should be a significant portion of the frame)
-        contour_area = cv2.contourArea(largest)
-        frame_area = w * h
-        if contour_area < frame_area * 0.05:  # At least 5% of frame
-            continue
-        
-        hull = cv2.convexHull(largest)
-        
-        # Try to get 4 corners with adaptive epsilon
-        for epsilon_factor in [0.01, 0.02, 0.03, 0.05]:
-            epsilon = epsilon_factor * cv2.arcLength(hull, True)
-            approx = cv2.approxPolyDP(hull, epsilon, True)
+        for contour, area, _ in large_contours[:2]:  # Try top 2
+            hull = cv2.convexHull(contour)
             
-            if len(approx) == 4:
-                corners = approx.reshape(-1, 2).astype(np.float32)
-                # Validate corners
-                if _validate_corners(corners, w, h):
-                    ordered = _order_points(corners)
-                    score = _score_corners(ordered, w, h)
-                    if score > best_score:
-                        best_score = score
-                        best_corners = ordered
-                break
-            elif len(approx) > 4:
-                # Too many points, try to get bounding rectangle
-                rect = cv2.minAreaRect(approx)
-                box_points = cv2.boxPoints(rect)
-                corners = box_points.astype(np.float32)
-                if _validate_corners(corners, w, h):
-                    ordered = _order_points(corners)
-                    score = _score_corners(ordered, w, h)
-                    if score > best_score:
-                        best_score = score
-                        best_corners = ordered
-                break
+            for epsilon_factor in [0.01, 0.02, 0.03, 0.05]:
+                epsilon = epsilon_factor * cv2.arcLength(hull, True)
+                approx = cv2.approxPolyDP(hull, epsilon, True)
+                
+                if len(approx) == 4:
+                    corners = approx.reshape(-1, 2).astype(np.float32)
+                    if _validate_corners(corners, w, h):
+                        ordered = _order_points(corners)
+                        score = _score_corners(ordered, w, h)
+                        if score > best_score:
+                            best_score = score
+                            best_corners = ordered
+                    break
+                elif len(approx) > 4:
+                    rect = cv2.minAreaRect(approx)
+                    box_points = cv2.boxPoints(rect)
+                    corners = box_points.astype(np.float32)
+                    if _validate_corners(corners, w, h):
+                        ordered = _order_points(corners)
+                        score = _score_corners(ordered, w, h)
+                        if score > best_score:
+                            best_score = score
+                            best_corners = ordered
+                    break
         
-        # If we got 4 corners, try this result
         if best_corners is not None and best_score > 0.5:
             break
     
     return best_corners
+
+
+def _refine_corners_with_edges(frame: np.ndarray, initial_corners: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Refine corner detection by finding actual field edge boundaries.
+    This helps when the green mask finds a region that's not the actual field boundary.
+    """
+    h, w = frame.shape[:2]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Use Canny edge detection to find field boundaries
+    edges = cv2.Canny(gray, 50, 150)
+    
+    # Dilate edges to connect nearby lines
+    kernel = np.ones((3, 3), np.uint8)
+    edges = cv2.dilate(edges, kernel, iterations=1)
+    
+    # Find lines using HoughLinesP
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=50, maxLineGap=10)
+    
+    if lines is None or len(lines) == 0:
+        return initial_corners
+    
+    # Find intersection points of lines near the initial corners
+    refined = []
+    margin = min(w, h) * 0.1
+    
+    for corner in initial_corners:
+        cx, cy = corner
+        # Find the closest line intersection near this corner
+        best_point = corner
+        min_dist = float('inf')
+        
+        # Look for line intersections within margin of this corner
+        for i, line1 in enumerate(lines):
+            x1, y1, x2, y2 = line1[0]
+            for j, line2 in enumerate(lines[i+1:], i+1):
+                x3, y3, x4, y4 = line2[0]
+                
+                # Calculate intersection
+                denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+                if abs(denom) < 1e-6:
+                    continue
+                
+                t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+                u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+                
+                if 0 <= t <= 1 and 0 <= u <= 1:
+                    px = x1 + t * (x2 - x1)
+                    py = y1 + t * (y2 - y1)
+                    
+                    # Check if intersection is near the corner
+                    dist = np.sqrt((px - cx)**2 + (py - cy)**2)
+                    if dist < margin and dist < min_dist:
+                        min_dist = dist
+                        best_point = np.array([px, py], dtype=np.float32)
+        
+        refined.append(best_point)
+    
+    if len(refined) == 4:
+        return np.array(refined, dtype=np.float32)
+    
+    return initial_corners
 
 
 def _validate_corners(corners: np.ndarray, img_width: int, img_height: int) -> bool:
@@ -263,59 +555,92 @@ class TacticalViewProjector:
 
         try:
             self._homography = Homography(corners, target)
+            
             # Validate homography by testing transformed points
             transformed = self._homography.transform_points(corners)
-            # Check if transformed points are reasonable
-            if np.any(transformed < -self.width) or np.any(transformed > self.width * 2):
-                return False
-            if np.any(transformed[:, 1] < -self.height) or np.any(transformed[:, 1] > self.height * 2):
-                return False
+            
+            # Check if transformed points are reasonable (should map to target corners)
+            # Allow some tolerance for numerical errors
+            tolerance = 5
+            expected = target
+            for i in range(4):
+                dist = np.linalg.norm(transformed[i] - expected[i])
+                if dist > tolerance:
+                    # Homography doesn't map corners correctly
+                    return False
+            
+            # Additional validation: check if homography is well-conditioned
+            # by testing a few points in the middle of the field
+            test_points = np.array([
+                [corners[0][0] + (corners[1][0] - corners[0][0]) * 0.5, 
+                 corners[0][1] + (corners[2][1] - corners[0][1]) * 0.5],  # Center
+                [corners[0][0] + (corners[1][0] - corners[0][0]) * 0.25, 
+                 corners[0][1] + (corners[2][1] - corners[0][1]) * 0.25],  # Quarter point
+            ], dtype=np.float32)
+            
+            test_transformed = self._homography.transform_points(test_points)
+            # Check that transformed points are within reasonable bounds
+            for pt in test_transformed:
+                if pt[0] < -self.width * 0.5 or pt[0] > self.width * 1.5:
+                    return False
+                if pt[1] < -self.height * 0.5 or pt[1] > self.height * 1.5:
+                    return False
+            
         except (ValueError, Exception):
             return False
 
         self._ready = True
         return True
 
+    def _get_foot_position(self, player: Player) -> Optional[np.ndarray]:
+        """
+        Get the foot position (bottom center of bounding box) for a player.
+        This is more accurate for tactical view as players are on the ground.
+        """
+        if player.detection is None:
+            return None
+        
+        # Try to get absolute points first (accounts for camera movement)
+        points = None
+        if hasattr(player.detection, 'absolute_points') and player.detection.absolute_points is not None:
+            points = player.detection.absolute_points
+        elif hasattr(player.detection, 'points') and player.detection.points is not None:
+            points = player.detection.points
+        
+        if points is None or len(points) < 2:
+            return None
+        
+        # Get bounding box coordinates
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+        
+        # Foot position is bottom center of bounding box (where player touches ground)
+        foot_x = (x1 + x2) / 2
+        foot_y = max(y1, y2)  # Bottom of bounding box
+        
+        return np.array([foot_x, foot_y], dtype=np.float32)
+
     def project_players(self, players: Sequence[Player]) -> List[TacticalProjection]:
-        """Project current player centers onto the tactical view."""
+        """
+        Project current player foot positions onto the tactical view.
+        Uses foot position (bottom center of bbox) instead of center for better accuracy.
+        """
         if not self.ready or not players:
             return []
 
         projections: List[TacticalProjection] = []
 
         for player in players:
-            # Try center_abs first (absolute coordinates), fallback to center (stabilized)
-            center = None
-            if hasattr(player, 'center_abs') and player.center_abs is not None:
-                try:
-                    center = player.center_abs
-                    if not isinstance(center, np.ndarray) or center.size < 2:
-                        center = None
-                except (AttributeError, TypeError):
-                    pass
+            # Get foot position (bottom center of bbox)
+            foot_pos = self._get_foot_position(player)
             
-            if center is None and hasattr(player, 'center') and player.center is not None:
-                try:
-                    center = player.center
-                    if not isinstance(center, np.ndarray) or center.size < 2:
-                        center = None
-                except (AttributeError, TypeError):
-                    pass
-            
-            if center is None:
+            if foot_pos is None:
                 continue
 
             try:
-                # Ensure center is 2D
-                if center.ndim == 1 and len(center) >= 2:
-                    center = center[:2]
-                elif center.ndim > 1:
-                    center = center.reshape(-1)[:2]
-                else:
-                    continue
-
+                # Transform foot position to tactical view
                 transformed = self._homography.transform_points(
-                    np.array([center], dtype=np.float32)
+                    np.array([foot_pos], dtype=np.float32)
                 )[0]
 
                 # Validate transformed position
