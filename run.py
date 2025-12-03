@@ -144,11 +144,7 @@ parser.add_argument(
     action="store_true",
     help="Render a tactical top-down view built from automatic homography estimation",
 )
-parser.add_argument(
-    "--whiteline",
-    action="store_true",
-    help="Overlay detected white field lines in yellow for debugging the tactical homography",
-)
+
 parser.add_argument(
     "--movement-analysis",
     action="store_true",
@@ -377,10 +373,7 @@ for i, frame in enumerate(video):
     if tactical_projector:
         tactical_overlay = tactical_projector.render_view(frame=frame, players=players)
 
-    if args.whiteline and tactical_projector:
-        annotated = tactical_projector.annotate_field_lines(frame)
-        if annotated is not None:
-            frame = annotated
+
 
     # Draw
     frame = PIL.Image.fromarray(frame)
