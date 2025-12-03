@@ -24,6 +24,7 @@ from soccer.pass_event import Pass
 from soccer.movement_analysis import MovementAnalyzer
 from auto_calibrate import auto_calibrate
 from tactical_view import TacticalViewProjector
+from court_keypoint_detector import CourtKeypointDetector
 
 
 def build_match_setup(
@@ -253,6 +254,7 @@ if pixels_to_meters is None:
 # Object Detectors
 player_detector = YoloV5()
 ball_detector = YoloV5(model_path=args.model)
+court_detector = CourtKeypointDetector(model_path="models/keypoint_detector.pt")
 
 match, teams = build_match_setup(
     match_key=match_key,
@@ -286,7 +288,7 @@ coord_transformations = None
 # Paths
 path = AbsolutePath()
 
-tactical_projector = TacticalViewProjector() if (args.tactical_view or args.movement_analysis) else None
+tactical_projector = TacticalViewProjector(pixels_to_meters=pixels_to_meters) if (args.tactical_view or args.movement_analysis) else None
 movement_analyzer = MovementAnalyzer() if args.movement_analysis else None
 
 if args.movement_analysis and not args.tactical_view:
@@ -310,6 +312,12 @@ for i, frame in enumerate(video):
     players_detections = get_player_detections(player_detector, frame)
     ball_detections = get_ball_detections(ball_detector, frame)
     detections = ball_detections + players_detections
+
+    # Detect court keypoints
+    if tactical_projector:
+        court_keypoints = court_detector.get_court_keypoints([frame])
+        if court_keypoints:
+            tactical_projector.update_homography_from_keypoints(court_keypoints[0])
 
     # Update trackers
     coord_transformations = update_motion_estimator(

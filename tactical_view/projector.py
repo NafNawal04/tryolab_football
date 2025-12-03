@@ -9,6 +9,9 @@ import numpy as np
 from soccer.player import Player
 from tactical_view.homography import Homography
 
+def measure_distance(p1, p2):
+    return np.linalg.norm(np.array(p1) - np.array(p2))
+
 
 @dataclass
 class TacticalProjection:
@@ -526,7 +529,7 @@ class TacticalViewProjector:
     derived from automatically detected pitch corners (no manual annotation required).
     """
 
-    def __init__(self, width: int = 400, height: int = 240, initialization_frames: int = 5) -> None:
+    def __init__(self, width: int = 400, height: int = 240, initialization_frames: int = 5, pixels_to_meters: float = None) -> None:
         self.width = width
         self.height = height
         self._homography: Optional[Homography] = None
@@ -538,6 +541,45 @@ class TacticalViewProjector:
         self._max_initialization_attempts = 30  # Try for 30 frames before giving up
         self._last_field_lines: Optional[np.ndarray] = None
         self._last_field_mask: Optional[np.ndarray] = None
+        self.pixels_to_meters = pixels_to_meters if pixels_to_meters is not None else 0.05  # Default to 5cm/px if unknown
+
+        # Football field dimensions in meters (standard FIFA field)
+        self.actual_width_in_meters = 105  # 105m length
+        self.actual_height_in_meters = 68   # 68m width
+
+        # Football field keypoints based on the trained model configuration
+        # 35 points total: 15 orange (left), 5 pink (center), 15 blue (right)
+        
+        # Calculate field dimensions and positions
+        field_width = self.width
+        field_height = self.height
+        center_x = field_width // 2
+        center_y = field_height // 2
+        
+        # Goal area dimensions (approximate proportions)
+        goal_area_width = int(field_width * 0.15)  # 15% of field width
+        penalty_area_width = int(field_width * 0.25)  # 25% of field width
+        goal_area_height = int(field_height * 0.3)  # 30% of field height
+        penalty_area_height = int(field_height * 0.4)  # 40% of field height
+        
+        self.key_points = [
+            # LEFT GOAL AREA (Orange dots - 15 points)
+            (0, 0), (goal_area_width, 0), (penalty_area_width, 0),
+            (0, center_y - goal_area_height//2), (goal_area_width, center_y - goal_area_height//2), (penalty_area_width, center_y - penalty_area_height//2),
+            (0, center_y), (goal_area_width, center_y), (penalty_area_width, center_y),
+            (0, center_y + goal_area_height//2), (goal_area_width, center_y + goal_area_height//2), (penalty_area_width, center_y + penalty_area_height//2),
+            (0, field_height), (goal_area_width, field_height), (penalty_area_width, field_height),
+            
+            # CENTER AREA (Pink dots - 5 points)
+            (center_x, 0), (center_x - 20, center_y), (center_x, center_y), (center_x + 20, center_y), (center_x, field_height),
+            
+            # RIGHT GOAL AREA (Blue dots - 15 points)
+            (field_width - penalty_area_width, 0), (field_width - goal_area_width, 0), (field_width, 0),
+            (field_width - penalty_area_width, center_y - penalty_area_height//2), (field_width - goal_area_width, center_y - goal_area_height//2), (field_width, center_y - goal_area_height//2),
+            (field_width - penalty_area_width, center_y), (field_width - goal_area_width, center_y), (field_width, center_y),
+            (field_width - penalty_area_width, center_y + penalty_area_height//2), (field_width - goal_area_width, center_y + goal_area_height//2), (field_width, center_y + goal_area_height//2),
+            (field_width - penalty_area_width, field_height), (field_width - goal_area_width, field_height), (field_width, field_height),
+        ]
 
     @property
     def ready(self) -> bool:
@@ -585,12 +627,43 @@ class TacticalViewProjector:
             # Average the corners for stability
             corners = np.mean(self._corner_buffer, axis=0)
 
+        # Calculate target points based on real-world size to avoid stretching
+        # 1. Calculate width/height of the detected region in pixels
+        # Use the top edge for width and left edge for height as approximation
+        detected_width_px = np.linalg.norm(corners[1] - corners[0])
+        detected_height_px = np.linalg.norm(corners[3] - corners[0])
+        
+        # 2. Convert to meters
+        detected_width_m = detected_width_px * self.pixels_to_meters
+        detected_height_m = detected_height_px * self.pixels_to_meters
+        
+        # 3. Map to tactical board pixels
+        # Assume tactical board represents a standard pitch ~105m x 68m
+        # Board size is self.width x self.height
+        # We want to map the detected region to a proportional rectangle on the board
+        
+        # Scale factor for the tactical board (pixels per meter on the board)
+        # Fit the 105m length into self.width with some margin
+        board_scale = (self.width * 0.9) / 105.0 
+        
+        target_width = detected_width_m * board_scale
+        target_height = detected_height_m * board_scale
+        
+        # Center the target rectangle on the board
+        cx = self.width / 2
+        cy = self.height / 2
+        
+        x1 = cx - target_width / 2
+        x2 = cx + target_width / 2
+        y1 = cy - target_height / 2
+        y2 = cy + target_height / 2
+        
         target = np.array(
             [
-                [0, 0],
-                [self.width, 0],
-                [0, self.height],
-                [self.width, self.height],
+                [x1, y1], # Top-Left
+                [x2, y1], # Top-Right
+                [x1, y2], # Bottom-Left
+                [x2, y2], # Bottom-Right
             ],
             dtype=np.float32,
         )
@@ -633,6 +706,54 @@ class TacticalViewProjector:
 
         self._ready = True
         return True
+
+    def update_homography_from_keypoints(self, keypoints) -> bool:
+        """
+        Update homography using detected keypoints from the CourtKeypointDetector.
+        """
+        if keypoints is None:
+            return False
+            
+        try:
+            # Handle YOLO keypoints object
+            if hasattr(keypoints, 'xy'):
+                kps = keypoints.xy.tolist()
+                if not kps:
+                    return False
+                frame_keypoints = kps[0]
+            else:
+                # Assume it's already a list of points
+                frame_keypoints = keypoints
+
+            # Filter valid keypoints (non-zero coordinates)
+            # We need to keep track of indices to match with self.key_points
+            src_points = []
+            dst_points = []
+            
+            for i, kp in enumerate(frame_keypoints):
+                if i >= len(self.key_points):
+                    break
+                
+                # Check if keypoint is detected (not 0,0 and confidence > 0 if available)
+                # YOLO keypoints might be [x, y] or [x, y, conf]
+                x, y = kp[0], kp[1]
+                if x > 0 and y > 0:
+                    src_points.append([x, y])
+                    dst_points.append(self.key_points[i])
+            
+            if len(src_points) < 4:
+                return False
+                
+            src_points = np.array(src_points, dtype=np.float32)
+            dst_points = np.array(dst_points, dtype=np.float32)
+            
+            self._homography = Homography(src_points, dst_points)
+            self._ready = True
+            return True
+            
+        except Exception as e:
+            print(f"Error updating homography from keypoints: {e}")
+            return False
 
     def _get_foot_position(self, player: Player) -> Optional[np.ndarray]:
         """
@@ -818,8 +939,21 @@ class TacticalViewProjector:
         if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
-                cv2.line(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                # Draw thicker yellow line
+                cv2.line(annotated, (x1, y1), (x2, y2), (0, 255, 255), 3)
                 drew_any = True
+            
+            # Add text indicating detection count
+            cv2.putText(
+                annotated,
+                f"Detected {len(lines)} lines",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
         # If we still didn't draw anything, fall back to showing field mask edges
         if not drew_any:
