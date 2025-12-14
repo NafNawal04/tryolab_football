@@ -537,49 +537,75 @@ class TacticalViewProjector:
         self._initialization_frames = initialization_frames
         self._frame_buffer: List[np.ndarray] = []
         self._corner_buffer: List[np.ndarray] = []
+        self._keypoint_buffer: List = []  # Buffer for keypoints
         self._initialization_attempts = 0
         self._max_initialization_attempts = 30  # Try for 30 frames before giving up
         self._last_field_lines: Optional[np.ndarray] = None
         self._last_field_mask: Optional[np.ndarray] = None
+        self._homography_initialized = False  # Track if homography is set
         self.pixels_to_meters = pixels_to_meters if pixels_to_meters is not None else 0.05  # Default to 5cm/px if unknown
 
         # Football field dimensions in meters (standard FIFA field)
         self.actual_width_in_meters = 105  # 105m length
         self.actual_height_in_meters = 68   # 68m width
 
-        # Football field keypoints based on the trained model configuration
-        # 35 points total: 15 orange (left), 5 pink (center), 15 blue (right)
+        # Football field keypoint coordinates in METERS (standard FIFA field: 105m x 68m)
+        # Based on the keypoint detection model training
+        # Coordinates are (x, y) where x is along length (0-105m) and y is along width (0-68m)
+        # Origin is at bottom-left corner of the field
         
-        # Calculate field dimensions and positions
-        field_width = self.width
-        field_height = self.height
-        center_x = field_width // 2
-        center_y = field_height // 2
-        
-        # Goal area dimensions (approximate proportions)
-        goal_area_width = int(field_width * 0.15)  # 15% of field width
-        penalty_area_width = int(field_width * 0.25)  # 25% of field width
-        goal_area_height = int(field_height * 0.3)  # 30% of field height
-        penalty_area_height = int(field_height * 0.4)  # 40% of field height
-        
-        self.key_points = [
-            # LEFT GOAL AREA (Orange dots - 15 points)
-            (0, 0), (goal_area_width, 0), (penalty_area_width, 0),
-            (0, center_y - goal_area_height//2), (goal_area_width, center_y - goal_area_height//2), (penalty_area_width, center_y - penalty_area_height//2),
-            (0, center_y), (goal_area_width, center_y), (penalty_area_width, center_y),
-            (0, center_y + goal_area_height//2), (goal_area_width, center_y + goal_area_height//2), (penalty_area_width, center_y + penalty_area_height//2),
-            (0, field_height), (goal_area_width, field_height), (penalty_area_width, field_height),
+        self.field_keypoint_coords_meters = {
+            # Left side (goal area & penalty area)
+            0: (0, 68),      # Top-left corner
+            1: (0, 62.2),    # Left side, penalty area top
+            2: (0, 55.9),    # Left side, goal area top
+            3: (0, 49.6),    # Left side, goal area top edge
+            4: (0, 43.4),    # Left side, goal area bottom edge
+            5: (0, 0),       # Bottom-left corner
+            6: (5.5, 62.2),  # Goal area top-right
+            7: (5.5, 49.6),  # Goal area center-right
+            8: (5.5, 37.1),  # Goal area bottom-right
+            9: (16.5, 37.1), # Penalty area bottom-right
+            10: (5.5, 55.9), # Goal area top edge right
+            11: (5.5, 43.4), # Goal area bottom edge right
+            12: (11, 49.6),  # Penalty spot area
             
-            # CENTER AREA (Pink dots - 5 points)
-            (center_x, 0), (center_x - 20, center_y), (center_x, center_y), (center_x + 20, center_y), (center_x, field_height),
+            # Center
+            13: (52.5, 68),    # Top center
+            14: (52.5, 58.85), # Center circle top
+            15: (43.35, 49.6), # Center circle left
+            16: (61.65, 49.6), # Center circle right
+            17: (52.5, 40.35), # Center circle bottom
+            18: (52.5, 0),     # Bottom center
             
-            # RIGHT GOAL AREA (Blue dots - 15 points)
-            (field_width - penalty_area_width, 0), (field_width - goal_area_width, 0), (field_width, 0),
-            (field_width - penalty_area_width, center_y - penalty_area_height//2), (field_width - goal_area_width, center_y - goal_area_height//2), (field_width, center_y - goal_area_height//2),
-            (field_width - penalty_area_width, center_y), (field_width - goal_area_width, center_y), (field_width, center_y),
-            (field_width - penalty_area_width, center_y + penalty_area_height//2), (field_width - goal_area_width, center_y + goal_area_height//2), (field_width, center_y + goal_area_height//2),
-            (field_width - penalty_area_width, field_height), (field_width - goal_area_width, field_height), (field_width, field_height),
-        ]
+            # Right side (goal area & penalty area)
+            19: (105, 68),    # Top-right corner
+            20: (105, 62.2),  # Right side, penalty area top
+            21: (105, 55.9),  # Right side, goal area top
+            22: (105, 49.6),  # Right side, goal area center
+            23: (105, 43.4),  # Right side, goal area bottom
+            24: (105, 0),     # Bottom-right corner
+            25: (99.5, 62.2), # Right goal area top-left
+            26: (99.5, 55.9), # Right goal area edge
+            27: (99.5, 49.6), # Right goal area center-left
+            28: (99.5, 43.4), # Right goal area bottom-left
+            29: (99.5, 37.1), # Right goal area bottom edge
+            30: (88.5, 49.6), # Right penalty area center-left
+            31: (94, 49.6),   # Right penalty spot area
+        }
+        
+        # Scale factors to convert meters to tactical view pixels
+        self.scale_x = self.width / 105.0   # pixels per meter (length)
+        self.scale_y = self.height / 68.0   # pixels per meter (width)
+        
+        # Convert field coordinates to tactical view pixel coordinates
+        self.key_points = {}
+        for kp_id, (x_m, y_m) in self.field_keypoint_coords_meters.items():
+            # Convert meters to pixels
+            # Note: y-axis is flipped (0 at top in image coordinates)
+            x_px = x_m * self.scale_x
+            y_px = (68 - y_m) * self.scale_y  # Flip y-axis
+            self.key_points[kp_id] = (x_px, y_px)
 
     @property
     def ready(self) -> bool:
@@ -705,13 +731,19 @@ class TacticalViewProjector:
             return False
 
         self._ready = True
+        self._homography_initialized = True
         return True
 
     def update_homography_from_keypoints(self, keypoints) -> bool:
         """
         Update homography using detected keypoints from the CourtKeypointDetector.
-        Uses a simplified bounding box approach similar to FootballAnalysis.
+        Maps detected keypoints to their corresponding real field positions.
+        Only initializes ONCE for stability.
         """
+        # If already initialized, don't update - keep homography stable!
+        if self._homography_initialized and self._ready:
+            return True
+            
         if keypoints is None:
             return False
             
@@ -730,43 +762,97 @@ class TacticalViewProjector:
                 # Assume it's already a list of points
                 frame_keypoints = keypoints
 
-            # Filter valid keypoints (non-zero coordinates)
-            valid_keypoints = [(kp[0], kp[1]) for kp in frame_keypoints if kp[0] > 0 and kp[1] > 0]
+            # Extract valid detected keypoints with their IDs
+            # frame_keypoints is a list where index = keypoint ID
+            detected_points = []
+            for kp_id, kp in enumerate(frame_keypoints):
+                x, y = kp[0], kp[1]
+                # Skip invalid keypoints (0, 0)
+                if x > 0 and y > 0:
+                    detected_points.append((kp_id, x, y))
             
             # Need at least 4 keypoints for homography
-            if len(valid_keypoints) < 4:
+            if len(detected_points) < 4:
                 return False
             
-            # Use simplified approach: map bounding box of detected keypoints to tactical view
-            # This is more robust than trying to match individual keypoints
-            min_x = min(kp[0] for kp in valid_keypoints)
-            max_x = max(kp[0] for kp in valid_keypoints)
-            min_y = min(kp[1] for kp in valid_keypoints)
-            max_y = max(kp[1] for kp in valid_keypoints)
+            # Buffer keypoints for averaging (similar to corner detection)
+            self._keypoint_buffer.append(detected_points)
+            if len(self._keypoint_buffer) > self._initialization_frames:
+                self._keypoint_buffer.pop(0)
             
-            # Create source points (corners of detected field)
-            source_points = np.array([
-                [min_x, min_y],  # Top-left
-                [max_x, min_y],  # Top-right
-                [min_x, max_y],  # Bottom-left
-                [max_x, max_y]   # Bottom-right
-            ], dtype=np.float32)
+            self._initialization_attempts += 1
             
-            # Create target points (corners of tactical view)
-            target_points = np.array([
-                [0, 0],                    # Top-left
-                [self.width, 0],           # Top-right
-                [0, self.height],          # Bottom-left
-                [self.width, self.height]  # Bottom-right
-            ], dtype=np.float32)
+            # Need enough samples before creating homography
+            if len(self._keypoint_buffer) < max(2, self._initialization_frames // 2):
+                if self._initialization_attempts >= self._max_initialization_attempts and len(self._keypoint_buffer) > 0:
+                    # Use what we have
+                    pass
+                else:
+                    return False
             
-            # Create homography
-            self._homography = Homography(source_points, target_points)
+            # Average keypoint positions across buffered frames for stability
+            # Group by keypoint ID
+            keypoint_positions = {}
+            for frame_kps in self._keypoint_buffer:
+                for kp_id, x, y in frame_kps:
+                    if kp_id not in keypoint_positions:
+                        keypoint_positions[kp_id] = []
+                    keypoint_positions[kp_id].append((x, y))
+            
+            # Average positions for each keypoint ID
+            averaged_keypoints = []
+            for kp_id, positions in keypoint_positions.items():
+                avg_x = np.mean([p[0] for p in positions])
+                avg_y = np.mean([p[1] for p in positions])
+                averaged_keypoints.append((kp_id, avg_x, avg_y))
+            
+            # Need at least 4 keypoints
+            if len(averaged_keypoints) < 4:
+                return False
+            
+            # Create source and target point arrays for homography
+            source_points = []  # Detected positions in video frame
+            target_points = []  # Corresponding positions on tactical view
+            
+            for kp_id, x, y in averaged_keypoints:
+                # Check if this keypoint ID exists in our field mapping
+                if kp_id in self.key_points:
+                    source_points.append([x, y])
+                    target_points.append(list(self.key_points[kp_id]))
+            
+            if len(source_points) < 4:
+                print(f"Warning: Only {len(source_points)} keypoints matched to field positions")
+                return False
+            
+            source_points = np.array(source_points, dtype=np.float32)
+            target_points = np.array(target_points, dtype=np.float32)
+            
+            # Use cv2.findHomography for robust transformation
+            # RANSAC method handles outliers better
+            H, mask = cv2.findHomography(source_points, target_points, cv2.RANSAC, 5.0)
+            
+            if H is None:
+                print("Failed to compute homography matrix")
+                return False
+            
+            # Create Homography object with the computed matrix
+            # We need to pass source and target points, but Homography class will compute it again
+            # So we use a minimal set (4 points) to initialize, then override the matrix
+            self._homography = Homography(source_points[:4], target_points[:4])
+            self._homography.m = H  # Override with our RANSAC-computed matrix
+            
             self._ready = True
+            self._homography_initialized = True
+            
+            inliers = np.sum(mask) if mask is not None else len(source_points)
+            print(f"Homography initialized from {len(source_points)} keypoints ({inliers} inliers)")
+            print(f"Detected keypoint IDs: {[kp_id for kp_id, _, _ in averaged_keypoints]}")
             return True
             
         except Exception as e:
             print(f"Error updating homography from keypoints: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def _get_foot_position(self, player: Player) -> Optional[np.ndarray]:

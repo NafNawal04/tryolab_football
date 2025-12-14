@@ -345,21 +345,19 @@ while True:
     ball_detections = get_ball_detections(ball_detector, frame)
     detections = ball_detections + players_detections
 
-    # Detect court keypoints
-    if tactical_projector:
+    # Detect court keypoints ONLY during initialization
+    if tactical_projector and not tactical_projector.ready:
         court_keypoints = court_detector.get_court_keypoints([frame])
         if court_keypoints and len(court_keypoints) > 0:
-            # Update homography from detected keypoints
+            # Try to initialize homography from detected keypoints
             success = tactical_projector.update_homography_from_keypoints(court_keypoints[0])
             if success:
-                if frame_count % 30 == 0:  # Log every 30 frames
-                    logging.debug(f"Frame {frame_count}: Keypoint-based homography updated")
-            elif not tactical_projector.ready:
+                logging.info(f"Frame {frame_count}: Tactical view initialized from keypoints")
+            else:
                 # Fallback to automatic corner detection if keypoint detection fails
                 if tactical_projector.try_initialize(frame):
-                    if frame_count % 30 == 0:
-                        logging.debug(f"Frame {frame_count}: Using corner-based homography (keypoint fallback)")
-        elif not tactical_projector.ready:
+                    logging.info(f"Frame {frame_count}: Tactical view initialized from corner detection")
+        else:
             # No keypoints detected, try corner detection
             tactical_projector.try_initialize(frame)
 

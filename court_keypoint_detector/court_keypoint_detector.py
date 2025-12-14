@@ -32,7 +32,9 @@ class CourtKeypointDetector:
         batch_size = 20
         court_keypoints = []
         for i in range(0, len(frames), batch_size):
-            detections_batch = self.model.predict(frames[i:i+batch_size], conf=0.5)
+            # Lower confidence threshold to 0.15 for better detection
+            # Model was trained on specific video, may need lower threshold for other videos
+            detections_batch = self.model.predict(frames[i:i+batch_size], conf=0.15)
             for detection in detections_batch:
                 court_keypoints.append(detection.keypoints)
 
