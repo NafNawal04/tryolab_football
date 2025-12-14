@@ -156,6 +156,12 @@ parser.add_argument(
     default=None,
     help="Conversion factor from pixels to meters (e.g., 0.01 for 100px=1m). If not provided, will be automatically calibrated.",
 )
+parser.add_argument(
+    "--output",
+    type=str,
+    default="output/output.mp4",
+    help="Path to the output video file (default: output/output.mp4)",
+)
 args = parser.parse_args()
 logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
 
@@ -220,8 +226,32 @@ else:
             args.video,
         )
 
-video = Video(input_path=args.video)
-fps = video.video_capture.get(cv2.CAP_PROP_FPS)
+# Create output directory if it doesn't exist
+output_path = Path(args.output)
+output_path.parent.mkdir(parents=True, exist_ok=True)
+
+# Initialize video input and output
+# Note: We use cv2.VideoCapture and cv2.VideoWriter directly instead of norfair's Video class
+# because norfair's Video.write() always calls cv2.waitKey(), which fails in headless environments
+video_capture = cv2.VideoCapture(args.video)
+if not video_capture.isOpened():
+    raise ValueError(f"Could not open video file: {args.video}")
+
+fps = video_capture.get(cv2.CAP_PROP_FPS)
+frame_width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+
+# Initialize video writer
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+video_writer = cv2.VideoWriter(str(output_path), fourcc, fps, (frame_width, frame_height))
+
+if not video_writer.isOpened():
+    raise ValueError(f"Could not create output video file: {output_path}")
+
+logging.info(f"Processing video: {args.video}")
+logging.info(f"Output will be saved to: {output_path}")
+logging.info(f"Resolution: {frame_width}x{frame_height}, FPS: {fps}, Total frames: {total_frames}")
 
 # Auto-calibrate pixels_to_meters if not provided
 pixels_to_meters = args.pixels_to_meters
@@ -297,7 +327,13 @@ passes_background = match.get_passes_background()
 interceptions_background = match.get_interceptions_background() if args.interceptions else None
 tackles_background = match.get_tackles_background() if args.tackles else None
 
-for i, frame in enumerate(video):
+frame_count = 0
+while True:
+    ret, frame = video_capture.read()
+    if not ret:
+        break
+    
+    i = frame_count
     frame_number = i  # Track frame number for distance tracking
     
     # Reset distance tracking on first frame to ensure everyone starts at 0
@@ -470,9 +506,15 @@ for i, frame in enumerate(video):
         frame.paste(overlay_img, overlay_position)
 
     frame = np.array(frame)
+    
+    # Write video using cv2.VideoWriter (headless-compatible)
+    video_writer.write(frame)
+    frame_count += 1
 
-    # Write video
-    video.write(frame)
+# Release resources
+video_capture.release()
+video_writer.release()
+logging.info(f"Video processing complete. Output saved to: {output_path}")
 
 # Print movement analysis summary if enabled
 if movement_analyzer:
