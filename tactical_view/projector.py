@@ -710,6 +710,7 @@ class TacticalViewProjector:
     def update_homography_from_keypoints(self, keypoints) -> bool:
         """
         Update homography using detected keypoints from the CourtKeypointDetector.
+        Uses a simplified bounding box approach similar to FootballAnalysis.
         """
         if keypoints is None:
             return False
@@ -717,37 +718,50 @@ class TacticalViewProjector:
         try:
             # Handle YOLO keypoints object
             if hasattr(keypoints, 'xy'):
-                kps = keypoints.xy.tolist()
-                if not kps:
+                kps = keypoints.xy
+                if kps is None or len(kps) == 0:
                     return False
-                frame_keypoints = kps[0]
+                # Get the first batch (should be only one frame)
+                kps_list = kps.tolist()
+                if not kps_list or len(kps_list[0]) == 0:
+                    return False
+                frame_keypoints = kps_list[0]
             else:
                 # Assume it's already a list of points
                 frame_keypoints = keypoints
 
             # Filter valid keypoints (non-zero coordinates)
-            # We need to keep track of indices to match with self.key_points
-            src_points = []
-            dst_points = []
+            valid_keypoints = [(kp[0], kp[1]) for kp in frame_keypoints if kp[0] > 0 and kp[1] > 0]
             
-            for i, kp in enumerate(frame_keypoints):
-                if i >= len(self.key_points):
-                    break
-                
-                # Check if keypoint is detected (not 0,0 and confidence > 0 if available)
-                # YOLO keypoints might be [x, y] or [x, y, conf]
-                x, y = kp[0], kp[1]
-                if x > 0 and y > 0:
-                    src_points.append([x, y])
-                    dst_points.append(self.key_points[i])
-            
-            if len(src_points) < 4:
+            # Need at least 4 keypoints for homography
+            if len(valid_keypoints) < 4:
                 return False
-                
-            src_points = np.array(src_points, dtype=np.float32)
-            dst_points = np.array(dst_points, dtype=np.float32)
             
-            self._homography = Homography(src_points, dst_points)
+            # Use simplified approach: map bounding box of detected keypoints to tactical view
+            # This is more robust than trying to match individual keypoints
+            min_x = min(kp[0] for kp in valid_keypoints)
+            max_x = max(kp[0] for kp in valid_keypoints)
+            min_y = min(kp[1] for kp in valid_keypoints)
+            max_y = max(kp[1] for kp in valid_keypoints)
+            
+            # Create source points (corners of detected field)
+            source_points = np.array([
+                [min_x, min_y],  # Top-left
+                [max_x, min_y],  # Top-right
+                [min_x, max_y],  # Bottom-left
+                [max_x, max_y]   # Bottom-right
+            ], dtype=np.float32)
+            
+            # Create target points (corners of tactical view)
+            target_points = np.array([
+                [0, 0],                    # Top-left
+                [self.width, 0],           # Top-right
+                [0, self.height],          # Bottom-left
+                [self.width, self.height]  # Bottom-right
+            ], dtype=np.float32)
+            
+            # Create homography
+            self._homography = Homography(source_points, target_points)
             self._ready = True
             return True
             
@@ -773,15 +787,18 @@ class TacticalViewProjector:
         if points is None or len(points) < 2:
             return None
         
-        # Get bounding box coordinates
-        x1, y1 = points[0]
-        x2, y2 = points[1]
-        
-        # Foot position is bottom center of bounding box (where player touches ground)
-        foot_x = (x1 + x2) / 2
-        foot_y = max(y1, y2)  # Bottom of bounding box
-        
-        return np.array([foot_x, foot_y], dtype=np.float32)
+        try:
+            # Get bounding box coordinates
+            x1, y1 = points[0]
+            x2, y2 = points[1]
+            
+            # Foot position is bottom center of bounding box (where player touches ground)
+            foot_x = (x1 + x2) / 2.0
+            foot_y = max(y1, y2)  # Bottom of bounding box
+            
+            return np.array([foot_x, foot_y], dtype=np.float32)
+        except (IndexError, TypeError, ValueError):
+            return None
 
     def project_players(self, players: Sequence[Player]) -> List[TacticalProjection]:
         """
